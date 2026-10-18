@@ -1,3 +1,16 @@
+## [1.6.0] - 2026-10-19
+
+### Added
+
+- Drag a queued row by its handle with a semi-transparent full-row ghost following the pointer;
+  the source row remains in flow and moves live so the other rows make room.
+- Add a queue-dock Merge action that combines pure-text queued messages into the first item.
+  Messages with attachments are refused because the Host queue edit accepts text only.
+
+### Verified
+
+- `node scripts/check.mjs`: 26 checks green.
+
 # Changelog
 
 All notable changes to this project are documented in this file.

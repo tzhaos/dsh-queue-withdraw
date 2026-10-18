@@ -43,6 +43,10 @@ window.__ModuleLoader__.load({
       'button.editHint': 'Edit and withdraw into the composer',
       'reorder.tooltip': 'Drag to reorder queued messages',
       'reorder.failed': 'Reorder failed; the queue may have changed',
+      'merge.label': 'Merge queued messages',
+      'merge.tooltip': 'Merge the queued text messages into one',
+      'merge.failed': 'Merge failed; the queue may have changed',
+      'merge.attachments': 'Messages with attachments cannot be merged',
       'button.empty': 'This queued message has no text to withdraw',
       'button.failed': 'Withdraw failed; the message is still queued',
     }
@@ -451,23 +455,23 @@ window.__ModuleLoader__.load({
           if (accepted !== true) button.disabled = false
         }
 
-        /** Give one row a drag handle and row-local drop listeners. */
+        /** Whether a pointer drag is currently moving a queue row. */
+        let dragging = false
+
+        /** Give one row a drag handle and a full-row pointer drag ghost. */
         const createHandle = (row, item) => {
           if (typeof row.querySelector !== 'function' || typeof row.insertBefore !== 'function') return null
           const handle = document.createElement('button')
           handle.type = 'button'
           handle.className = 'dshqw-handle'
-          handle.draggable = true
           handle.setAttribute('data-dshq-handle', '')
           handle.setAttribute('aria-label', tRef.current('reorder.tooltip'))
           handle.title = tRef.current('reorder.tooltip')
           handle.innerHTML = HANDLE_ICON
           handleItems.set(handle, item)
           handle.addEventListener('dragstart', (event) => {
-            const current = handleItems.get(handle)
-            if (current === undefined) return
-            event.dataTransfer?.setData('application/x-dshq-item', String(current.id))
-            event.dataTransfer?.setData('text/plain', String(current.id))
+            event.dataTransfer?.setData('application/x-dshq-item', String(item.id))
+            event.dataTransfer?.setData('text/plain', String(item.id))
             if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.effectAllowed = 'move'
           })
           row.addEventListener('dragover', (event) => {
@@ -484,13 +488,85 @@ window.__ModuleLoader__.load({
             if (target === undefined || source === String(target.id)) return
             event.preventDefault?.()
             event.stopPropagation?.()
-            const order = queueRef.current.map((current) => String(current.id))
+            const order = queueRef.current.map((entry) => String(entry.id))
             const from = order.indexOf(source)
             const to = order.indexOf(String(target.id))
             if (from < 0 || to < 0) return
             order.splice(from, 1)
             order.splice(to, 0, source)
             await actionsRef.current.reorder(order, tRef.current('reorder.failed'))
+          })
+          handle.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) return
+            const current = handleItems.get(handle)
+            if (current === undefined) return
+            const dock = row.closest?.('[data-queue-dock]') ?? row.parentElement
+            if (dock === null || dock === undefined) return
+            const initial = hostRowsOf(dock).map((entry) => {
+              const entryHandle = entry.querySelector?.('[data-dshq-handle]')
+              return entryHandle === null || entryHandle === undefined ? undefined : handleItems.get(entryHandle)?.id
+            }).filter((id) => id !== undefined).map(String)
+            const startX = event.clientX
+            const startY = event.clientY
+            const rowRect = row.getBoundingClientRect()
+            const offsetX = event.clientX - rowRect.left
+            const offsetY = event.clientY - rowRect.top
+            let ghost = null
+            let started = false
+            const moveGhost = (pointerEvent) => {
+              if (ghost === null) return
+              ghost.style.left = (pointerEvent.clientX - offsetX) + 'px'
+              ghost.style.top = (pointerEvent.clientY - offsetY) + 'px'
+            }
+            const begin = (pointerEvent) => {
+              started = true
+              dragging = true
+              const rect = row.getBoundingClientRect()
+              ghost = row.cloneNode(true)
+              ghost.classList.add('dshqw-drag-ghost')
+              ghost.style.width = rect.width + 'px'
+              ghost.style.height = rect.height + 'px'
+              ghost.style.left = rect.left + 'px'
+              ghost.style.top = rect.top + 'px'
+              row.classList.add('dshqw-drag-source')
+              document.body.appendChild(ghost)
+              moveGhost(pointerEvent)
+            }
+            const move = (pointerEvent) => {
+              if (!started) {
+                if (Math.hypot(pointerEvent.clientX - startX, pointerEvent.clientY - startY) < 3) return
+                begin(pointerEvent)
+              }
+              pointerEvent.preventDefault?.()
+              moveGhost(pointerEvent)
+              const target = document.elementFromPoint?.(pointerEvent.clientX, pointerEvent.clientY)?.closest?.('li')
+              if (target === null || target === undefined || target === row) return
+              const rows = hostRowsOf(dock).filter((entry) => entry !== row)
+              if (!rows.includes(target)) return
+              const rect = target.getBoundingClientRect()
+              const before = pointerEvent.clientY < rect.top + rect.height / 2
+              target.parentNode?.insertBefore(row, before ? target : target.nextSibling)
+            }
+            const finish = async () => {
+              document.removeEventListener?.('pointermove', move, true)
+              document.removeEventListener?.('pointerup', finish, true)
+              document.removeEventListener?.('pointercancel', finish, true)
+              ghost?.remove?.()
+              row.classList.remove('dshqw-drag-source')
+              dragging = false
+              if (!started) return
+              const order = hostRowsOf(dock).map((entry) => {
+                const entryHandle = entry.querySelector?.('[data-dshq-handle]')
+                const targetItem = entryHandle === null || entryHandle === undefined ? undefined : handleItems.get(entryHandle)
+                return targetItem === undefined ? undefined : String(targetItem.id)
+              }).filter((id) => id !== undefined)
+              if (order.length !== initial.length || order.some((id, index) => id !== initial[index])) {
+                await actionsRef.current.reorder(order, tRef.current('reorder.failed'))
+              }
+            }
+            document.addEventListener?.('pointermove', move, true)
+            document.addEventListener?.('pointerup', finish, true)
+            document.addEventListener?.('pointercancel', finish, true)
           })
           row.insertBefore(handle, row.firstChild ?? null)
           return handle
@@ -530,7 +606,7 @@ window.__ModuleLoader__.load({
           }
         }
         const sync = () => {
-          if (disposed) return
+          if (disposed || dragging) return
           const queueNow = mutableRef.current === true ? queueRef.current : []
           const docks = docksOf(sessionId)
           for (const dock of docks) {
@@ -544,7 +620,35 @@ window.__ModuleLoader__.load({
               else handleItems.set(handle, item)
               syncHostEdit(row, item)
             }
+            syncMergeButton(dock)
           }
+        }
+
+        /** Add or refresh the merge action for one queue dock. */
+        const syncMergeButton = (dock) => {
+          if (typeof dock.appendChild !== 'function') return
+          let merge = dock.querySelector?.('[data-dshq-merge]')
+          if (merge === null || merge === undefined) {
+            merge = document.createElement('button')
+            merge.type = 'button'
+            merge.className = 'dshqw-merge'
+            merge.setAttribute('data-dshq-merge', '')
+            merge.addEventListener('click', async () => {
+              if (merge.disabled === true) return
+              merge.disabled = true
+              const accepted = await actionsRef.current.mergeQueue(
+                queueRef.current,
+                tRef.current('merge.failed'),
+                tRef.current('merge.attachments'),
+              )
+              if (merge !== null) merge.disabled = false
+            })
+            dock.appendChild(merge)
+          }
+          const count = queueRef.current.length
+          merge.textContent = tRef.current('merge.label') + (count > 1 ? ' (' + String(count) + ')' : '')
+          merge.title = tRef.current('merge.tooltip')
+          merge.hidden = count < 2 || mutableRef.current !== true
         }
         const observer = new MutationObserver(schedule)
         observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
@@ -554,6 +658,7 @@ window.__ModuleLoader__.load({
           observer.disconnect()
           cancelFrame()
           for (const handle of document.querySelectorAll?.('[data-dshq-handle]') ?? []) handle.remove?.()
+          for (const merge of document.querySelectorAll?.('[data-dshq-merge]') ?? []) merge.remove?.()
           for (const edit of [...editEntries]) {
             if (edit.hasAttribute?.('data-dshq-edit') === true) edit.disabled = true
             edit.removeAttribute?.('data-dshq-edit')
@@ -595,6 +700,36 @@ window.__ModuleLoader__.load({
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 1px;
 }
+.dshqw-drag-source {
+  opacity: .28;
+  transition: opacity 120ms ease;
+}
+.dshqw-drag-ghost {
+  position: fixed;
+  z-index: 140;
+  box-sizing: border-box;
+  pointer-events: none;
+  opacity: .72;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-elevation-soft);
+  overflow: hidden;
+}
+.dshqw-merge {
+  align-self: flex-start;
+  margin: 4px 0 0 24px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.dshqw-merge:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dshqw-merge[hidden] { display: none; }
 `
 
     /**
@@ -744,6 +879,47 @@ window.__ModuleLoader__.load({
                   if (response.ok !== true || body?.ok !== true) {
                     notify('error', failure)
                     return false
+                  }
+                  return true
+                } catch {
+                  notify('error', failure)
+                  return false
+                }
+              },
+              /**
+               * Merge queued pure-text messages into the first one. Attachments
+               * are refused because the Host's queue edit accepts text only.
+               * @param {object[]} items - current next-turn queue.
+               * @param {string} failure - merge failure notice.
+               * @param {string} attachment - attachment refusal notice.
+               * @returns {Promise<boolean>} whether the queue was merged.
+               */
+              mergeQueue: async (items, failure, attachment) => {
+                const list = Array.isArray(items) ? items : []
+                if (list.length < 2) return false
+                const plans = list.map((entry) => ({ item: entry, plan: withdrawPlan(entry?.content) }))
+                if (plans.some((entry) => entry.plan.unsupported || entry.plan.attachments.length > 0)) {
+                  notify('error', attachment)
+                  return false
+                }
+                const texts = plans.map((entry) => entry.plan.text).filter((text) => text.trim() !== '')
+                if (texts.length < 2) return false
+                const binding = ctx.sessions.binding(sessionId)
+                const session = binding?.session
+                if (session === undefined || typeof session.updateQueue !== 'function') {
+                  notify('error', failure)
+                  return false
+                }
+                const merged = texts.join('\n\n')
+                try {
+                  const first = await session.updateQueue(list[0].id, {
+                    kind: 'edit',
+                    content: [{ type: 'text', text: merged }],
+                  })
+                  if (first?.accepted !== true && first?.ok !== true) throw new Error('merge rejected')
+                  for (const entry of list.slice(1)) {
+                    const removed = await session.updateQueue(entry.id, { kind: 'remove' })
+                    if (removed?.accepted !== true && removed?.ok !== true) throw new Error('remove rejected')
                   }
                   return true
                 } catch {

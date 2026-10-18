@@ -44,7 +44,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.5.1')
+  assert.equal(manifest.version, '1.6.0')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -583,6 +583,40 @@ await check('no separate withdraw button is injected into the Host row', () => {
   const applied = scenario()
   mountDecoration(applied, [queueItem('queued text')])
   assert.equal(applied.document._row.querySelector('[data-dsh-queue-withdraw]'), null)
+})
+
+await check('drag uses a row ghost instead of only the handle', () => {
+  assert(clientSource.includes('dshqw-drag-ghost'))
+  assert(clientSource.includes('dshqw-drag-source'))
+  assert(clientSource.includes("handle.addEventListener('pointerdown'"))
+})
+
+await check('the merge action is exposed in the queue dock', () => {
+  assert(clientSource.includes('dshqw-merge'))
+  assert(clientSource.includes('mergeQueue'))
+})
+
+await check('merging queued text edits the first item and removes the rest', async () => {
+  const applied = scenario()
+  const first = queueItem('first')
+  const second = { ...queueItem('second'), id: 'item-2' }
+  const ok = await applied.injected.actions.mergeQueue([first, second], 'failed', 'attachment')
+  assert.equal(ok, true)
+  equal(applied.updates, [
+    { itemId: 'item-1', action: { kind: 'edit', content: [{ type: 'text', text: 'first\n\nsecond' }] } },
+    { itemId: 'item-2', action: { kind: 'remove' } },
+  ])
+})
+
+await check('merging refuses queued messages with attachments', async () => {
+  const applied = scenario()
+  const first = queueItem('first')
+  const second = queueItem('second', [{ type: 'file', attachment: { attachmentId: 'file-1', name: 'notes.txt', bytes: 10 } }])
+  second.id = 'item-2'
+  const ok = await applied.injected.actions.mergeQueue([first, second], 'failed', 'attachment')
+  assert.equal(ok, false)
+  equal(applied.updates, [])
+  equal(applied.notices, [{ level: 'error', text: 'attachment' }])
 })
 
 await check('dragging a queue row posts the complete new order', async () => {
