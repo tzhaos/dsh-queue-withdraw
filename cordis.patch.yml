@@ -1,0 +1,7 @@
+# Bundle patch for dsh-queue-withdraw.
+#
+# One row activates both halves: the no-op Host entry is how the Client module
+# registry discovers the browser bundle declared by package.json's `dsh.client`.
+- insert:
+    - id: queue-withdraw
+      name: 'dsh-queue-withdraw'
