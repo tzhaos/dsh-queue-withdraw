@@ -58,6 +58,10 @@ window.__ModuleLoader__.load({
     const CACHE_STORE = 'files'
     const CACHE_TTL_MS = 24 * 60 * 60 * 1000
     const memoryCache = []
+  /** Draft attachment id to selected browser File, for session-switch restoration. */
+  const draftFiles = new Map()
+  /** Files attached to a composer when its session was unmounted. */
+  const pendingDraftFiles = new Map()
     let cacheDbPromise
 
     /** @returns {Promise<IDBDatabase|null>} cache database, or null when unavailable. */
@@ -206,6 +210,9 @@ window.__ModuleLoader__.load({
         const original = conversation.createDrafts.bind(conversation)
         conversation.createDrafts = (sessionId, files) => {
           const drafts = original(sessionId, files)
+          drafts.forEach((draft, index) => {
+            if (typeof draft?.id === 'string' && files[index] !== undefined) draftFiles.set(draft.id, files[index])
+          })
           if (conversation.__dshQueueWithdrawRestoring !== true) rememberFiles(sessionId, files)
           return drafts
         }
@@ -372,6 +379,19 @@ window.__ModuleLoader__.load({
         if (removed.length > 0) void actionsRef.current.forgetCached?.(removed)
         previousFileRefsRef.current = current
       }, [queue])
+
+      useEffect(() => {
+        const timer = setInterval(() => actionsRef.current.saveDraftAttachments?.(), 400)
+        return () => {
+          clearInterval(timer)
+          actionsRef.current.saveDraftAttachments?.()
+        }
+      }, [])
+
+      useEffect(() => {
+        const timer = setTimeout(() => { void actionsRef.current.restoreDraftAttachments?.() }, 0)
+        return () => clearTimeout(timer)
+      }, [])
 
       useEffect(() => {
         if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return undefined
@@ -598,6 +618,40 @@ window.__ModuleLoader__.load({
             actions: {
               /** Drop cache records for queue file references that left the queue. */
               forgetCached: (refs) => { void forgetCachedRefs(sessionId, refs) },
+              /** Remember the files currently attached to this composer before unmount. */
+              saveDraftAttachments: () => {
+                try {
+                  const ids = Array.isArray(shell?.snapshot?.attachmentIds) ? shell.snapshot.attachmentIds : []
+                  const files = ids.map((id) => draftFiles.get(id)).filter((file) => file !== undefined)
+                  if (ids.length > 0 && files.length === ids.length) pendingDraftFiles.set(sessionId, files)
+                } catch {
+                  // A disposed shell has no snapshot; the last poll already saved it.
+                }
+              },
+              /** Re-add files saved from this session's previous composer mount. */
+              restoreDraftAttachments: async () => {
+                const files = pendingDraftFiles.get(sessionId)
+                if (files === undefined || files.length === 0) return
+                try {
+                  for (let attempt = 0; attempt < 20; attempt += 1) {
+                    const ids = shell?.snapshot?.attachmentIds
+                    if (!Array.isArray(ids)) {
+                      await new Promise((resolve) => setTimeout(resolve, 50))
+                      continue
+                    }
+                    if (ids.length > 0 || typeof conversation?.createDrafts !== 'function'
+                      || typeof shell?.actions?.addAttachments !== 'function') break
+                    const drafts = conversation.createDrafts(sessionId, files)
+                    const restoredIds = drafts.map((draft) => draft?.id).filter((id) => typeof id === 'string')
+                    if (restoredIds.length === files.length && shell.actions.addAttachments(restoredIds) === true) break
+                    await new Promise((resolve) => setTimeout(resolve, 50))
+                  }
+                } catch {
+                  // Best effort: the draft text itself is still persisted by DSH.
+                } finally {
+                  pendingDraftFiles.delete(sessionId)
+                }
+              },
               /**
                * Persist one complete next-turn order through the Host route.
                * @param {string[]} order - every live queue id in the desired order.

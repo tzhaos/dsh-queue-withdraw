@@ -5,10 +5,10 @@
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 客户端插件：给输入区排队中的消息增加 **撤回编辑** 和 **拖动排序**。
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-21-brightgreen)
+![Checks](https://img.shields.io/badge/checks-22-brightgreen)
 
 ## 为什么
 
@@ -27,6 +27,7 @@ DSH 的排队消息行提供编辑、删除和插话三个动作。编辑只支�
   撤回时重新注册为草稿文件附件，让 DSH 自己重新上传
 - 所有编辑都走撤回：不再出现 Host 的纯文本内联编辑器
 - 排序通过 Host 的 `Inbox.splice()` 原子重排 `next-turn`，不是只改界面顺序
+- 切换会话再回来时，自动恢复上次草稿里的图片/文件附件
 
 ## 文件附件临时缓存
 
@@ -124,7 +125,7 @@ node scripts/check.mjs
 ```
 
 零依赖测试覆盖清单、bundle patch、locale、队列文本提取、撤回成功/失败、草稿恢复、图片附件回填、
-文件临时缓存回填、缓存清理、Host 编辑图标重定向、拖动排序接口和主题样式等 21 项检查。
+文件临时缓存回填、缓存清理、Host 编辑图标重定向、拖动排序接口和主题样式等 22 项检查。
 
 ## 许可证
 

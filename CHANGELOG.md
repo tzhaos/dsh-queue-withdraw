@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-19
+
+### Added
+
+- Composer image/file attachments are kept in memory while switching conversations and re-added when
+  returning to the original session. The existing draft text persistence is unchanged.
+
+### Verified
+
+- `node scripts/check.mjs`: 22 checks green.
+
 ## [1.4.0] - 2026-10-19
 
 ### Changed

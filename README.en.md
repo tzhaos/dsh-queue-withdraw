@@ -6,10 +6,10 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client
 **edit-by-withdraw** and **drag reordering** to queued messages.
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-21-brightgreen)
+![Checks](https://img.shields.io/badge/checks-22-brightgreen)
 
 ## Why
 
@@ -27,6 +27,7 @@ with attachments cannot be changed; the queue also sends strictly in submission 
 - **file attachments** are supported by caching the browser `File` in IndexedDB before the Host
   uploads it; withdrawing registers it as a draft file again so DSH re-uploads it normally
 - reordering uses the Host `Inbox.splice()` on `next-turn`, not a visual-only sort
+- draft image/file attachments are restored when returning to a conversation
 
 ## Temporary file cache
 
@@ -137,7 +138,7 @@ node scripts/check.mjs
 
 The zero-dependency suite covers manifest/patch/locale, queue extraction, successful and rejected
 withdrawal, draft restoration, image rehydration, cached file restoration, cache cleanup, Host row
-injection and theme styling — 21 checks.
+injection and theme styling — 22 checks.
 
 ## License
 

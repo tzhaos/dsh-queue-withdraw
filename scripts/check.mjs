@@ -44,7 +44,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.4.0')
+  assert.equal(manifest.version, '1.5.0')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -336,6 +336,10 @@ function loadClient({ react, document, sessions, locale, fetch }) {
       observe() {}
       disconnect() {}
     },
+    setInterval: () => 0,
+    clearInterval: () => {},
+    setTimeout: () => 0,
+    clearTimeout: () => {},
     console,
   }
   if (fetch !== undefined) sandbox.fetch = fetch
@@ -359,6 +363,7 @@ function scenario(options = {}) {
   const updates = []
   const notices = []
   const draft = { value: options.draft ?? '' }
+  const attachmentIds = [...(options.attachmentIds ?? [])]
   const addedAttachments = []
   const removedAttachments = []
   const releasedDrafts = []
@@ -387,7 +392,10 @@ function scenario(options = {}) {
       addAttachments: (ids) => { addedAttachments.push(...ids); return true },
       removeAttachment: (id) => { removedAttachments.push(id) },
     },
-    snapshot: { get draft() { return draft.value } },
+    snapshot: {
+      get draft() { return draft.value },
+      get attachmentIds() { return attachmentIds },
+    },
   }
   const conversation = {
     input: { for: () => notification },
@@ -425,7 +433,7 @@ function scenario(options = {}) {
   const injected = registration.options.inject('session-a')
   return {
     plugin, registration, registrations, localeRegistrations, document, reactRuntime,
-    updates, notices, draft, session, scope, notification, t, injected, conversation,
+    updates, notices, draft, attachmentIds, session, scope, notification, t, injected, conversation,
     addedAttachments, removedAttachments, releasedDrafts, draftCalls, readCalls,
   }
 }
@@ -601,6 +609,17 @@ await check('dragging a queue row posts the complete new order', async () => {
   await applied.document._rows[0].dispatch('drop', { dataTransfer: data })
   equal(requests.map((request) => request.url), ['/dsh-queue-withdraw/reorder'])
   equal(requests[0].body, { sessionId: 'session-a', order: ['item-2', 'item-1'] })
+})
+
+await check('composer attachments are restored after the session component unmounts', async () => {
+  const applied = scenario()
+  const file = { name: 'notes.txt', size: 10, type: 'text/plain', lastModified: 1 }
+  const drafts = applied.conversation.createDrafts('session-a', [file])
+  applied.attachmentIds.push(drafts[0].id)
+  applied.injected.actions.saveDraftAttachments()
+  applied.attachmentIds.length = 0
+  await applied.injected.actions.restoreDraftAttachments()
+  assert.deepEqual(applied.addedAttachments, ['draft-1'])
 })
 
 // ---------------------------------------------------------------------------
