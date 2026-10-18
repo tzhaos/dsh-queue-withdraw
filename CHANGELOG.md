@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-19
+
+### Changed
+
+- The Host edit icon is now the single queue action for every supported message. Clicking it always
+  withdraws the whole message (text + attachments) into the composer instead of opening the
+  text-only inline editor; the separate left-side withdraw button is removed.
+- Added drag reordering for queued messages through a leading handle. The Host half exposes
+  `/dsh-queue-withdraw/reorder`, validates the full `next-turn` id order and applies it atomically
+  through `Inbox.splice()`.
+
+### Verified
+
+- `node scripts/check.mjs`: 21 checks green.
+
 ## [1.3.0] - 2026-10-19
 
 ### Added

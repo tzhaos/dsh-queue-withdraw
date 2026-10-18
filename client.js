@@ -27,7 +27,9 @@ window.__ModuleLoader__.load({
       'button.attachments': '这条消息包含暂不支持的附件内容',
       'button.cacheMissing': '没有找到该文件附件的本地缓存，无法撤回',
       'button.cacheHint': '撤回文件附件（使用本插件的本地缓存）',
-      'button.editHint': '编辑包含附件的消息（会先撤回到输入栏）',
+      'button.editHint': '编辑并撤回到输入栏',
+      'reorder.tooltip': '拖动排序排队消息',
+      'reorder.failed': '排序失败，队列可能已变化',
       'button.empty': '这条排队消息没有可撤回的文本',
       'button.failed': '撤回失败，消息仍在队列中',
     }
@@ -38,13 +40,18 @@ window.__ModuleLoader__.load({
       'button.attachments': 'This message contains attachment content that cannot be withdrawn',
       'button.cacheMissing': 'No local cache was found for this file attachment; it cannot be withdrawn',
       'button.cacheHint': 'Withdraw file attachment (uses this plugin\'s local cache)',
-      'button.editHint': 'Edit a message with attachments (withdraws it to the composer first)',
+      'button.editHint': 'Edit and withdraw into the composer',
+      'reorder.tooltip': 'Drag to reorder queued messages',
+      'reorder.failed': 'Reorder failed; the queue may have changed',
       'button.empty': 'This queued message has no text to withdraw',
       'button.failed': 'Withdraw failed; the message is still queued',
     }
 
     /** Icon used by the injected row action. */
-    const WITHDRAW_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v7M5 6l3 3 3-3"/><path d="M3 12v1.5h10V12"/></svg>'
+  /** Drag handle icon. */
+  const HANDLE_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="6" cy="4" r="1"/><circle cx="10" cy="4" r="1"/><circle cx="6" cy="8" r="1"/><circle cx="10" cy="8" r="1"/><circle cx="6" cy="12" r="1"/><circle cx="10" cy="12" r="1"/></svg>'
+
+  const REORDER_PATH = '/dsh-queue-withdraw/reorder'
 
     /** Short-lived browser cache of files selected before a queue submission. */
     const CACHE_DB = 'dsh-queue-withdraw'
@@ -368,9 +375,9 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return undefined
-        const buttonItems = new Map()
         const editItems = new Map()
         const editEntries = new Set()
+        const handleItems = new WeakMap()
         let frame = null
         let disposed = false
         const cancelFrame = () => {
@@ -387,24 +394,7 @@ window.__ModuleLoader__.load({
             frame = setTimeout(() => { frame = null; sync() }, 0)
           }
         }
-        const removeButton = (button) => {
-          buttonItems.delete(button)
-          button.remove?.()
-        }
-        const syncButton = (button, item, text) => {
-          buttonItems.set(button, item)
-          button.dataset.dshItemId = String(item.id)
-          const plan = withdrawPlan(item.content)
-          const usable = !plan.unsupported && (plan.text !== '' || plan.attachments.length > 0)
-          button.disabled = !usable
-          button.title = !usable
-            ? (plan.unsupported ? tRef.current('button.attachments') : tRef.current('button.empty'))
-            : (plan.attachments.some?.((attachment) => attachment.type === 'file')
-              ? tRef.current('button.cacheHint')
-              : tRef.current('button.tooltip'))
-          button.setAttribute?.('aria-label', button.title)
-        }
-        /** Withdraw one queue item through a row action. */
+        /** Withdraw one queue item through the Host edit control. */
         const withdrawThrough = async (button, item) => {
           if (button.disabled) return
           button.disabled = true
@@ -418,15 +408,62 @@ window.__ModuleLoader__.load({
           if (accepted !== true) button.disabled = false
         }
 
+        /** Give one row a drag handle and row-local drop listeners. */
+        const createHandle = (row, item) => {
+          if (typeof row.querySelector !== 'function' || typeof row.insertBefore !== 'function') return null
+          const handle = document.createElement('button')
+          handle.type = 'button'
+          handle.className = 'dshqw-handle'
+          handle.draggable = true
+          handle.setAttribute('data-dshq-handle', '')
+          handle.setAttribute('aria-label', tRef.current('reorder.tooltip'))
+          handle.title = tRef.current('reorder.tooltip')
+          handle.innerHTML = HANDLE_ICON
+          handleItems.set(handle, item)
+          handle.addEventListener('dragstart', (event) => {
+            const current = handleItems.get(handle)
+            if (current === undefined) return
+            event.dataTransfer?.setData('application/x-dshq-item', String(current.id))
+            event.dataTransfer?.setData('text/plain', String(current.id))
+            if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.effectAllowed = 'move'
+          })
+          row.addEventListener('dragover', (event) => {
+            const types = event.dataTransfer?.types
+            if (types === null || types === undefined || !Array.from(types).includes('application/x-dshq-item')) return
+            event.preventDefault?.()
+            if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
+          })
+          row.addEventListener('drop', async (event) => {
+            const source = event.dataTransfer?.getData?.('application/x-dshq-item')
+            if (source === null || source === undefined || source === '') return
+            const targetHandle = row.querySelector?.('[data-dshq-handle]')
+            const target = targetHandle === null || targetHandle === undefined ? undefined : handleItems.get(targetHandle)
+            if (target === undefined || source === String(target.id)) return
+            event.preventDefault?.()
+            event.stopPropagation?.()
+            const order = queueRef.current.map((current) => String(current.id))
+            const from = order.indexOf(source)
+            const to = order.indexOf(String(target.id))
+            if (from < 0 || to < 0) return
+            order.splice(from, 1)
+            order.splice(to, 0, source)
+            await actionsRef.current.reorder(order, tRef.current('reorder.failed'))
+          })
+          row.insertBefore(handle, row.firstChild ?? null)
+          return handle
+        }
+
         /**
-         * Enable and redirect the Host edit control for attachment queues. The
-         * Host edit path only accepts text; our redirect withdraws the whole
-         * message (text + attachments) into the composer instead.
+         * Make the Host edit control the single queue action. Every edit is a
+         * withdraw: text plus attachments are moved back into the composer, so
+         * the Host's text-only inline editor never drops attachment blocks.
+         * Attachment rows need their disabled edit control re-enabled; plain
+         * text rows keep their native enabled state.
          */
         const syncHostEdit = (row, item) => {
           if (typeof row.querySelectorAll !== 'function') return
           const plan = withdrawPlan(item?.content)
-          if (plan.unsupported || plan.attachments.length === 0) return
+          if (plan.unsupported || (plan.text === '' && plan.attachments.length === 0)) return
           let edit = null
           for (const candidate of row.querySelectorAll('button[aria-label]')) {
             if (candidate.hasAttribute?.('data-dsh-queue-withdraw') === true) continue
@@ -436,7 +473,7 @@ window.__ModuleLoader__.load({
           if (edit === null) return
           editItems.set(edit, item)
           editEntries.add(edit)
-          edit.disabled = false
+          if (plan.attachments.length > 0) edit.disabled = false
           edit.title = tRef.current('button.editHint')
           if (edit.hasAttribute?.('data-dshq-edit') !== true) {
             edit.setAttribute?.('data-dshq-edit', '')
@@ -449,26 +486,6 @@ window.__ModuleLoader__.load({
             }, true)
           }
         }
-
-        const createButton = (row, item, text) => {
-          const button = document.createElement('button')
-          button.type = 'button'
-          button.className = 'dshqw-withdraw'
-          button.setAttribute('data-dsh-queue-withdraw', '')
-          button.innerHTML = WITHDRAW_ICON
-          syncButton(button, item, text)
-          button.addEventListener('click', (event) => {
-            event.preventDefault?.()
-            event.stopPropagation?.()
-            const itemId = button.dataset.dshItemId
-            const current = queueRef.current.find((candidate) => String(candidate.id) === itemId)
-              ?? buttonItems.get(button)
-            if (current === undefined) return
-            void withdrawThrough(button, current)
-          })
-          placeButton(row, button)
-          return button
-        }
         const sync = () => {
           if (disposed) return
           const queueNow = mutableRef.current === true ? queueRef.current : []
@@ -478,20 +495,12 @@ window.__ModuleLoader__.load({
             for (let index = 0; index < rows.length; index += 1) {
               const item = queueNow[index]
               if (item === undefined) continue
-              const text = textOfContent(item.content)
-              let button = rows[index].querySelector?.('[data-dsh-queue-withdraw]')
-              if (button === null || button === undefined) button = createButton(rows[index], item, text)
-              else syncButton(button, item, text)
-              syncHostEdit(rows[index], item)
+              const row = rows[index]
+              let handle = row.querySelector?.('[data-dshq-handle]')
+              if (handle === null || handle === undefined) handle = createHandle(row, item)
+              else handleItems.set(handle, item)
+              syncHostEdit(row, item)
             }
-          }
-          for (const button of [...buttonItems.keys()]) {
-            if (button.isConnected === false) {
-              buttonItems.delete(button)
-              continue
-            }
-            const owned = docks.some((dock) => dock.contains?.(button))
-            if (!owned) removeButton(button)
           }
         }
         const observer = new MutationObserver(schedule)
@@ -501,14 +510,13 @@ window.__ModuleLoader__.load({
           disposed = true
           observer.disconnect()
           cancelFrame()
-          for (const button of [...buttonItems.keys()]) button.remove?.()
+          for (const handle of document.querySelectorAll?.('[data-dshq-handle]') ?? []) handle.remove?.()
           for (const edit of [...editEntries]) {
-            edit.disabled = true
+            if (edit.hasAttribute?.('data-dshq-edit') === true) edit.disabled = true
             edit.removeAttribute?.('data-dshq-edit')
           }
           editEntries.clear()
           editItems.clear()
-          buttonItems.clear()
         }
       }, [sessionId, queueMutable])
 
@@ -517,32 +525,32 @@ window.__ModuleLoader__.load({
 
     /** Presentation only; colors and elevation come from the Host theme. */
     const CSS = `
-.dshqw-withdraw {
+.dshqw-handle {
   box-sizing: border-box;
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 22px;
+  width: 16px;
   height: 22px;
   padding: 0;
   border: 0;
   border-radius: var(--dsw-radius-sm);
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
+  cursor: grab;
+  opacity: .45;
 }
-.dshqw-withdraw:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover);
+.dshqw-handle:hover {
   color: var(--dsw-alias-label-primary);
+  opacity: 1;
 }
-.dshqw-withdraw:focus-visible {
+.dshqw-handle:active {
+  cursor: grabbing;
+}
+.dshqw-handle:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 1px;
-}
-.dshqw-withdraw:disabled {
-  cursor: default;
-  opacity: .4;
 }
 `
 
@@ -590,6 +598,30 @@ window.__ModuleLoader__.load({
             actions: {
               /** Drop cache records for queue file references that left the queue. */
               forgetCached: (refs) => { void forgetCachedRefs(sessionId, refs) },
+              /**
+               * Persist one complete next-turn order through the Host route.
+               * @param {string[]} order - every live queue id in the desired order.
+               * @param {string} failure - localized failure notice.
+               * @returns {Promise<boolean>} whether the Host applied the order.
+               */
+              reorder: async (order, failure) => {
+                try {
+                  const response = await fetch(REORDER_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId, order }),
+                  })
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true) {
+                    notify('error', failure)
+                    return false
+                  }
+                  return true
+                } catch {
+                  notify('error', failure)
+                  return false
+                }
+              },
               /**
                * Move one queued message into the draft and remove it from the
                * Host queue. The draft is written before removal and restored if

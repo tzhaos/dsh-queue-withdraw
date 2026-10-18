@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { apply as applyHostPlugin } from '../index.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8')
@@ -43,7 +44,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.3.0')
+  assert.equal(manifest.version, '1.4.0')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -84,7 +85,7 @@ await check('stylesheet uses theme tokens and no literal colors', () => {
   const css = clientSource.slice(start, end)
   assert.deepEqual([...css.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((match) => match[0]), [], 'literal colors')
   assert(css.includes('var(--dsw-'), 'theme tokens present')
-  assert(css.includes('.dshqw-withdraw'), 'withdraw styles')
+  assert(css.includes('.dshqw-handle'), 'drag handle styles')
 })
 
 await check('locale files carry title and description', () => {
@@ -272,12 +273,15 @@ class FakeNode {
     if (selector === '[data-dsh-queue-withdraw]') {
       return descendants.find((node) => node.getAttribute('data-dsh-queue-withdraw') !== null) ?? null
     }
+    if (selector === '[data-dshq-handle]') {
+      return descendants.find((node) => node.getAttribute('data-dshq-handle') !== null) ?? null
+    }
     return null
   }
 }
 
 /** Fake document with one QueueDock row, an owner Session wrapper and a body. */
-function createFakeDocument(queueText) {
+function createFakeDocument(queueText, rowCount = 1) {
   const body = new FakeNode('body')
   const owner = new FakeNode('div')
   owner.setAttribute('data-conversation-session', 'session-a')
@@ -285,28 +289,38 @@ function createFakeDocument(queueText) {
   const dock = new FakeNode('div')
   dock.setAttribute('data-queue-dock', '')
   owner.append(dock)
-  const row = new FakeNode('li')
-  dock.append(row)
-  const actionBox = new FakeNode('div')
-  row.append(actionBox)
-  const hostEdit = new FakeNode('button')
-  hostEdit.setAttribute('aria-label', '编辑')
-  actionBox.append(hostEdit)
+  const rows = []
+  const actionBoxes = []
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = new FakeNode('li')
+    dock.append(row)
+    const actionBox = new FakeNode('div')
+    row.append(actionBox)
+    const hostEdit = new FakeNode('button')
+    hostEdit.setAttribute('aria-label', '编辑')
+    actionBox.append(hostEdit)
+    rows.push(row)
+    actionBoxes.push(actionBox)
+  }
   const document = {
     body,
     head: { appendChild() {} },
     _dock: dock,
-    _row: row,
-    _actions: actionBox,
+    _row: rows[0],
+    _rows: rows,
+    _actions: actionBoxes[0],
+    _actionBoxes: actionBoxes,
     createElement: (tag) => new FakeNode(tag),
-    querySelectorAll: (selector) => selector === '[data-queue-dock]' ? [dock] : [],
+    querySelectorAll: (selector) => selector === '[data-queue-dock]' ? [dock]
+      : selector === '[data-dshq-handle]' ? rows.flatMap((row) => row.descendants()).filter((node) => node.getAttribute('data-dshq-handle') !== null)
+        : [],
   }
   void queueText
   return document
 }
 
 /** Load the client module against a fake runtime/document. */
-function loadClient({ react, document, sessions, locale }) {
+function loadClient({ react, document, sessions, locale, fetch }) {
   let loaded
   const sandbox = {
     window: { __ModuleLoader__: { load(definition) { loaded = definition } } },
@@ -324,6 +338,7 @@ function loadClient({ react, document, sessions, locale }) {
     },
     console,
   }
+  if (fetch !== undefined) sandbox.fetch = fetch
   vm.runInNewContext(clientSource, sandbox, { filename: 'client.js' })
   return loaded.factory((id) => {
     if (id === 'react') return react
@@ -387,11 +402,11 @@ function scenario(options = {}) {
     scope: () => scope,
     binding: () => ({ session }),
   }
-  const document = createFakeDocument(options.queueText ?? 'queued text')
+  const document = createFakeDocument(options.queueText ?? 'queued text', options.rows ?? 1)
   const localeRegistrations = []
   const registrations = []
   const reactRuntime = createFakeReact()
-  const plugin = loadClient({ react: reactRuntime.react, document, sessions })
+  const plugin = loadClient({ react: reactRuntime.react, document, sessions, fetch: options.fetch })
   const ctx = {
     effect: (factory) => { factory(); return () => {} },
     sessions,
@@ -523,65 +538,131 @@ await check('forgetCached drops files after their queue message leaves', async (
   equal(applied.notices, [{ level: 'error', text: 'cache-missing' }])
 })
 
-await check('the decoration adds one withdraw button to the Host queue row', () => {
-  const applied = scenario()
-  mountDecoration(applied, [queueItem('queued text')])
-  const button = applied.document._row.querySelector('[data-dsh-queue-withdraw]')
-  assert(button, 'button injected')
-  assert(button.innerHTML.includes('<svg'), 'icon present')
-  assert.equal(button.getAttribute('aria-label'), applied.t('button.tooltip'))
-  assert.equal(applied.document._row.children[0], button, 'withdraw button stays on the leading edge')
-})
-
-await check('clicking the injected button withdraws the queued text', async () => {
+await check('the Host edit control withdraws text instead of inline editing', async () => {
   const applied = scenario({ draft: 'existing' })
+  const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   mountDecoration(applied, [queueItem('queued text')])
-  const button = applied.document._row.querySelector('[data-dsh-queue-withdraw]')
-  await button.dispatch('click')
+  assert.equal(hostEdit.disabled, false)
+  assert.equal(hostEdit.title, '编辑并撤回到输入栏')
+  await hostEdit.dispatch('click')
   assert.equal(applied.draft.value, 'existing\n\nqueued text')
   equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
-  assert(button.disabled === true, 'button disabled after acceptance')
 })
 
-await check('the Host edit control is redirected to withdraw attachments', async () => {
+await check('the Host edit control is enabled and withdraws attachment queues', async () => {
   const applied = scenario({ draft: 'existing' })
   const item = queueItem('queued text', [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }])
   const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   hostEdit.disabled = true
   mountDecoration(applied, [item])
   assert.equal(hostEdit.disabled, false, 'edit control enabled for attachments')
-  assert.equal(hostEdit.title, '编辑包含附件的消息（会先撤回到输入栏）')
+  assert.equal(hostEdit.title, '编辑并撤回到输入栏')
   await hostEdit.dispatch('click')
   assert.equal(applied.draft.value, 'existing\n\nqueued text')
   equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
 })
 
-await check('a file-attachment queue row keeps a withdraw button ready for cache lookup', () => {
+await check('unsupported queue content leaves the Host edit control disabled', () => {
   const applied = scenario()
-  const item = queueItem('queued text', [{ type: 'file', attachment: { attachmentId: 'file-1', name: 'notes.txt', bytes: 10 } }])
+  const item = queueItem('queued text', [{ type: 'audio', attachment: { attachmentId: 'audio-1' } }])
+  const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
+  hostEdit.disabled = true
   mountDecoration(applied, [item])
-  const button = applied.document._row.querySelector('[data-dsh-queue-withdraw]')
-  assert(button, 'button injected')
-  assert.equal(button.disabled, false)
-  assert.equal(button.title, applied.t('button.cacheHint'))
+  assert.equal(hostEdit.disabled, true)
 })
 
-await check('an image-attachment queue row keeps the withdraw button enabled', () => {
-  const applied = scenario()
-  const item = queueItem('', [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }])
-  mountDecoration(applied, [item])
-  const button = applied.document._row.querySelector('[data-dsh-queue-withdraw]')
-  assert(button, 'button injected')
-  assert.equal(button.disabled, false)
-  assert.equal(button.title, applied.t('button.tooltip'))
-})
-
-await check('the registry contribution disposes its injected button', () => {
+await check('no separate withdraw button is injected into the Host row', () => {
   const applied = scenario()
   mountDecoration(applied, [queueItem('queued text')])
-  const button = applied.document._row.querySelector('[data-dsh-queue-withdraw]')
-  button.remove()
   assert.equal(applied.document._row.querySelector('[data-dsh-queue-withdraw]'), null)
+})
+
+await check('dragging a queue row posts the complete new order', async () => {
+  const requests = []
+  const fetch = async (url, init) => {
+    requests.push({ url, body: JSON.parse(init.body) })
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  const applied = scenario({ rows: 2, fetch })
+  const second = { ...queueItem('second'), id: 'item-2' }
+  mountDecoration(applied, [queueItem('first'), second])
+  const handles = applied.document._rows.map((row) => row.querySelector('[data-dshq-handle]'))
+  assert(handles[0] && handles[1], 'each row has a drag handle')
+  assert.equal(applied.document._rows[0].children[0], handles[0], 'handle stays on the leading edge')
+  const data = {
+    types: ['application/x-dshq-item'],
+    data: {},
+    effectAllowed: '',
+    dropEffect: '',
+    getData(type) { return this.data[type] ?? '' },
+    setData(type, value) { this.data[type] = value },
+  }
+  await handles[1].dispatch('dragstart', { dataTransfer: data })
+  await applied.document._rows[0].dispatch('drop', { dataTransfer: data })
+  equal(requests.map((request) => request.url), ['/dsh-queue-withdraw/reorder'])
+  equal(requests[0].body, { sessionId: 'session-a', order: ['item-2', 'item-1'] })
+})
+
+// ---------------------------------------------------------------------------
+// 4. Host reorder route
+// ---------------------------------------------------------------------------
+
+function hostScenario() {
+  let route
+  const messages = [
+    { id: 'item-1', content: [{ type: 'text', text: 'first' }] },
+    { id: 'item-2', content: [{ type: 'text', text: 'second' }] },
+  ]
+  const inbox = {
+    get nextTurn() { return messages },
+    splice(target, start, deleteCount, inserted) {
+      if (target !== 'next-turn') throw new Error('wrong target')
+      return messages.splice(start, deleteCount, ...inserted)
+    },
+  }
+  const agent = { inbox }
+  const ctx = {
+    effect(factory) { factory(); return () => {} },
+    webServer: {
+      register(definition) {
+        route = definition
+        return () => {}
+      },
+    },
+    agents: { get: (sessionId) => sessionId === 'session-a' ? agent : undefined },
+  }
+  applyHostPlugin(ctx)
+  const invoke = async (body, method = 'POST') => {
+    const response = { status: null, headers: null, payload: null }
+    const req = {
+      method,
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) },
+    }
+    const res = {
+      writeHead(status, headers) { response.status = status; response.headers = headers },
+      end(text) { response.payload = JSON.parse(text) },
+    }
+    await route.handler(req, res)
+    return { response, messages }
+  }
+  return { route, invoke, messages }
+}
+
+await check('the Host route applies a complete next-turn order through inbox.splice', async () => {
+  const host = hostScenario()
+  assert.equal(host.route.path, '/dsh-queue-withdraw/reorder')
+  const { response, messages } = await host.invoke({ sessionId: 'session-a', order: ['item-2', 'item-1'] })
+  assert.equal(response.status, 200)
+  equal(response.payload, { ok: true })
+  equal(messages.map((message) => message.id), ['item-2', 'item-1'])
+})
+
+await check('the Host route rejects an order that no longer matches the queue', async () => {
+  const host = hostScenario()
+  const { response, messages } = await host.invoke({ sessionId: 'session-a', order: ['item-2'] })
+  assert.equal(response.status, 409)
+  equal(response.payload, { ok: false, reason: 'queue-changed' })
+  equal(messages.map((message) => message.id), ['item-1', 'item-2'])
 })
 
 if (process.exitCode === 1) {

@@ -3,29 +3,30 @@
 [简体中文](README.md) | English
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client plugin that adds
-**withdraw back into the composer** to queued messages, instead of only edit, delete or steer.
+**edit-by-withdraw** and **drag reordering** to queued messages.
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-20-brightgreen)
+![Checks](https://img.shields.io/badge/checks-21-brightgreen)
 
 ## Why
 
-DSH's queued-message row offers edit, delete and steer. To take a message back and adjust it, delete
-loses the content and edit is less direct than restoring the composer.
+DSH's queued-message row offers edit, delete and steer. Edit only accepts plain text, so messages
+with attachments cannot be changed; the queue also sends strictly in submission order.
 
-`dsh-queue-withdraw` prepends one withdraw action to every queued row (on the left, away from the
-edit/delete/steer cluster):
+`dsh-queue-withdraw` makes every edit a withdraw and adds a leading drag handle:
 
-- restores the queued text to the composer
+- clicking the Host edit icon restores the whole message (text + attachments) to the composer
+- dragging the leading handle reorders queued messages
 - removes the item through `Session.updateQueue(itemId, { kind: 'remove' })`
 - appends to an existing draft instead of overwriting it
 - restores the previous draft if the Host rejects the removal
 - **image attachments** use the temporary cache first, then fall back to `session.readAttachment()`
 - **file attachments** are supported by caching the browser `File` in IndexedDB before the Host
   uploads it; withdrawing registers it as a draft file again so DSH re-uploads it normally
+- reordering uses the Host `Inbox.splice()` on `next-turn`, not a visual-only sort
 
 ## Temporary file cache
 
@@ -45,7 +46,11 @@ change the queue protocol.
 ## Behaviour
 
 - decorates only Host `[data-queue-dock]` rows; local pending echoes are skipped
-- the action hides with the row while the queue is collapsed and returns when expanded
+- the handle hides with the row while the queue is collapsed and returns when expanded
+- the edit icon redirects every supported message to withdraw; attachment rows have their disabled
+  edit control re-enabled
+- dropping a handle on another row posts the complete id order; the Host validates it and applies
+  an atomic `inbox.splice()`
 - the queue itself stays owned by DSH's QueueDock
 - no action is injected when the conversation queue is immutable (subagents)
 
@@ -96,7 +101,7 @@ again.
 The plugin registers in `conversation.input.dock`, reads the `next-turn` queue through
 `useProjection('inbox')`, and uses standard Session actions:
 
-1. a MutationObserver tracks `[data-queue-dock]` and prepends one compact action to each Host row;
+1. a MutationObserver tracks `[data-queue-dock]`, prepends a drag handle and wires the Host edit icon to withdraw;
 2. the session injection decorates `conversation.createDrafts` once to cache selected `File`s;
 3. the action supports text, images and file attachments; a missing file cache leaves the queue and
    draft untouched and reports that the file must be selected again;
@@ -104,7 +109,8 @@ The plugin registers in `conversation.input.dock`, reads the `next-turn` queue t
 5. caches are cleaned when the queue item leaves the queue; failures restore the draft and report an
    error.
 
-No remote API is added and the QueueDock edit/delete/steer behaviour is unchanged.
+The Host half adds one narrow same-origin route, `/dsh-queue-withdraw/reorder`, which accepts the
+complete `next-turn` id order and applies it atomically. QueueDock deletion/steering is unchanged.
 
 ## Known limitations
 
@@ -117,7 +123,8 @@ No remote API is added and the QueueDock edit/delete/steer behaviour is unchange
 - image restoration relies on the conversation draft registry (`createDrafts` / `addAttachments`) and
   may need compatibility updates after a DSH upgrade
 - the queue must be visible in the current conversation view; expand a collapsed queue to see the
-  action
+  handle
+- reordering requires the Host route; a queue that changes during the drag is rejected with an error
 - immutable subagent queues are skipped
 - existing draft text is preserved and the withdrawn text is appended
 - DSH client APIs are pre-stable; DOM/attribute contracts may need updates on DSH upgrades
@@ -130,7 +137,7 @@ node scripts/check.mjs
 
 The zero-dependency suite covers manifest/patch/locale, queue extraction, successful and rejected
 withdrawal, draft restoration, image rehydration, cached file restoration, cache cleanup, Host row
-injection and theme styling — 20 checks.
+injection and theme styling — 21 checks.
 
 ## License
 

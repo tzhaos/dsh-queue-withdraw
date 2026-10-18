@@ -2,31 +2,31 @@
 
 简体中文 | [English](README.en.md)
 
-一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 客户端插件：给输入区
-排队中的消息增加 **撤回到输入栏** 操作，而不是只能编辑、删除或插话。
+一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 客户端插件：给输入区排队中的消息增加 **撤回编辑** 和 **拖动排序**。
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-20-brightgreen)
+![Checks](https://img.shields.io/badge/checks-21-brightgreen)
 
 ## 为什么
 
-DSH 的排队消息行提供编辑、删除和插话三个动作。如果只是想先拿回来改一改，删除会丢失内容，
-编辑又不如直接放回输入框自然。
+DSH 的排队消息行提供编辑、删除和插话三个动作。编辑只支持纯文本，含附件的消息没法改；
+队列顺序也只能按提交顺序发送。
 
-`dsh-queue-withdraw` 在每个排队消息行的**左侧**追加一个撤回按钮（避免与右侧的编辑/删除/插话按钮误触）：
+`dsh-queue-withdraw` 把编辑统一变成“撤回后编辑”，并在行首提供拖动排序：
 
-- 点击后把队列里的文本放回输入框
+- 点击 Host 的编辑图标：整条消息（文本 + 附件）放回输入框，改完重新发送
+- 行首拖动把手：拖动排队消息调整发送顺序
 - 通过 `Session.updateQueue(itemId, { kind: 'remove' })` 从队列移除
 - 如果输入框已有草稿，会把消息追加到草稿末尾，而不是覆盖
 - 移除失败会把草稿恢复到操作前，消息仍在队列里
 - **图片附件可撤回**：优先使用临时缓存，缓存不存在时通过 Session 读取图片字节重建
 - **文件附件可撤回**：在用户选择文件、Host 上传之前，把浏览器 `File` 临时缓存到 IndexedDB；
   撤回时重新注册为草稿文件附件，让 DSH 自己重新上传
-- **包含附件的消息可编辑**：Host 原来对非文本消息禁用编辑；本插件启用编辑按钮，点击后把整条消息
-  （文本 + 附件）撤回到输入框，用户修改后重新发送
+- 所有编辑都走撤回：不再出现 Host 的纯文本内联编辑器
+- 排序通过 Host 的 `Inbox.splice()` 原子重排 `next-turn`，不是只改界面顺序
 
 ## 文件附件临时缓存
 
@@ -45,9 +45,11 @@ DSH 的排队消息行提供编辑、删除和插话三个动作。如果只是�
 ## 行为
 
 - 只装饰 Host 的 `[data-queue-dock]` 行；本地 pending echo 行不处理
-- 队列折叠时按钮随行一起隐藏；展开后自动出现
+- 队列折叠时把手随行一起隐藏；展开后自动出现
+- 编辑图标对所有可撤回消息生效；含附件时 Host 原本的禁用状态会被解除
+- 拖动把手到另一行后，客户端提交完整 id 顺序，Host 校验队列未变化后用 `inbox.splice()` 重排
 - 队列本身仍由 DSH 的 QueueDock 管理
-- 子智能体会话不可操作队列时，插件也不注入按钮
+- 子智能体会话不可操作队列时，插件也不启用编辑/排序
 
 点击撤回的流程：
 
@@ -94,13 +96,13 @@ plugin_manager(action="install_bundle", target="<本目录的绝对路径>")
 插件注册在 `conversation.input.dock` 槽位，使用 `useProjection('inbox')` 读取 `next-turn` 队列，
 并通过标准 Session 动作完成撤回：
 
-1. 用 MutationObserver 跟踪 `[data-queue-dock]` 的渲染，在每个 Host 队列行的行首追加一个紧凑按钮；
+1. 用 MutationObserver 跟踪 `[data-queue-dock]` 的渲染，在行首追加拖动把手，并把 Host 编辑按钮接到撤回流程；
 2. 在会话注入阶段装饰 `conversation.createDrafts`，缓存浏览器 `File`；
-3. 按钮支持文本、图片和文件附件；文件缓存缺失时不修改队列，并提示需要重新选择文件；
+3. 编辑/撤回支持文本、图片和文件附件；文件缓存缺失时不修改队列，并提示需要重新选择文件；
 4. 点击时先把附件和文本写入当前草稿，再调用 `updateQueue(remove)`；
 5. 队列项离开队列时清理对应缓存；失败时恢复草稿并给出错误提示。
 
-不新增远端接口，不改变 QueueDock 自己的编辑/删除/插话逻辑。
+Host 半新增一个同源窄接口 `/dsh-queue-withdraw/reorder`，只接受完整的 `next-turn` id 顺序；校验通过后原子 `splice`。不改变 QueueDock 自己的删除/插话逻辑。
 
 ## 已知限制
 
@@ -109,7 +111,8 @@ plugin_manager(action="install_bundle", target="<本目录的绝对路径>")
 - 缓存按 `name + size` 匹配；同名同大小的多个文件可能匹配到最近一次缓存
 - 队列消息长时间保留在队列中时，超过 24 小时的缓存可能在清理时被删除
 - 图片撤回依赖会话的草稿附件注册表（`createDrafts` / `addAttachments`），DSH 升级后可能需要适配
-- 队列必须在当前会话视图中渲染；折叠时展开队列后才能看到按钮
+- 队列必须在当前会话视图中渲染；折叠时展开队列后才能看到把手
+- 排序要求 Host 侧插件路由可用；队列在拖动期间发生变化会拒绝并提示
 - 不处理子智能体不可变的队列
 - 撤回文本时会追加到草稿末尾；附件会重新注册为草稿附件
 - DSH 客户端 API 仍是 pre-stable，DOM/属性契约随 DSH 升级可能需要适配
@@ -121,7 +124,7 @@ node scripts/check.mjs
 ```
 
 零依赖测试覆盖清单、bundle patch、locale、队列文本提取、撤回成功/失败、草稿恢复、图片附件回填、
-文件临时缓存回填、缓存清理、Host 队列行按钮注入和主题样式等 20 项检查。
+文件临时缓存回填、缓存清理、Host 编辑图标重定向、拖动排序接口和主题样式等 21 项检查。
 
 ## 许可证
 
