@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-19
+
+### Fixed
+
+- Track composer attachment ids immediately from the input facade and on the active-session switch,
+  not only from a slow poll. Switching conversations now saves the latest set before the old scope is
+  released and restores it when returning.
+
+### Verified
+
+- `node scripts/check.mjs`: 22 checks green.
+
 ## [1.5.0] - 2026-10-19
 
 ### Added

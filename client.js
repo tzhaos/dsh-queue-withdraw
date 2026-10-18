@@ -62,6 +62,10 @@ window.__ModuleLoader__.load({
   const draftFiles = new Map()
   /** Files attached to a composer when its session was unmounted. */
   const pendingDraftFiles = new Map()
+  /** Last attachment ids observed in each session's composer. */
+  const trackedDraftAttachments = new Map()
+  /** Per-session callback that snapshots the composer attachments. */
+  const draftSavers = new Map()
     let cacheDbPromise
 
     /** @returns {Promise<IDBDatabase|null>} cache database, or null when unavailable. */
@@ -202,6 +206,24 @@ window.__ModuleLoader__.load({
      * before upload. This is the only point that has the browser File objects.
      * @param {object|undefined} conversation - conversation service.
      */
+    /** Persist tracked ids for a session as pending files when it is left. */
+    function saveTrackedDraftFiles(sessionId) {
+      const ids = trackedDraftAttachments.get(sessionId) ?? []
+      if (ids.length === 0) {
+        pendingDraftFiles.delete(sessionId)
+        return
+      }
+      const files = ids.map((id) => draftFiles.get(id)).filter((file) => file !== undefined)
+      if (files.length === ids.length) pendingDraftFiles.set(sessionId, files)
+    }
+
+    /** @param {unknown} value @returns {string|undefined} session id. */
+    function sessionIdOfValue(value) {
+      if (typeof value === 'string') return value
+      if (value !== null && typeof value === 'object') return value.key ?? value.sessionId
+      return undefined
+    }
+
     function ensureDraftCacheHook(conversation) {
       if (conversation === null || conversation === undefined) return
       if (typeof conversation.createDrafts !== 'function') return
@@ -214,6 +236,7 @@ window.__ModuleLoader__.load({
             if (typeof draft?.id === 'string' && files[index] !== undefined) draftFiles.set(draft.id, files[index])
           })
           if (conversation.__dshQueueWithdrawRestoring !== true) rememberFiles(sessionId, files)
+          setTimeout(() => draftSavers.get(sessionId)?.(true), 0)
           return drafts
         }
         conversation.__dshQueueWithdrawCache = true
@@ -381,7 +404,7 @@ window.__ModuleLoader__.load({
       }, [queue])
 
       useEffect(() => {
-        const timer = setInterval(() => actionsRef.current.saveDraftAttachments?.(), 400)
+        const timer = setInterval(() => actionsRef.current.saveDraftAttachments?.(), 100)
         return () => {
           clearInterval(timer)
           actionsRef.current.saveDraftAttachments?.()
@@ -579,6 +602,19 @@ window.__ModuleLoader__.load({
      * @param {object} ctx - Client root context.
      */
     function apply(ctx) {
+      ctx.effect(() => {
+        const uiSession = typeof ctx.get === 'function' ? ctx.get('uiSession') : undefined
+        const current = uiSession?.current
+        if (current === undefined || typeof current.subscribe !== 'function') return () => {}
+        let previous = sessionIdOfValue(current.value)
+        const unsubscribe = current.subscribe(() => {
+          const next = sessionIdOfValue(current.value)
+          if (next === previous) return
+          if (previous !== undefined) saveTrackedDraftFiles(previous)
+          previous = next
+        })
+        return () => unsubscribe?.()
+      }, 'queue-withdraw: draft attachment switch tracking')
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'queue-withdraw: dictionaries')
       ctx.effect(() => {
         if (typeof document === 'undefined' || typeof document.createElement !== 'function') return () => {}
@@ -613,6 +649,43 @@ window.__ModuleLoader__.load({
               // A disposed scope simply loses the non-critical notice.
             }
           }
+          const scheduleSave = () => setTimeout(() => { try { saveDraftAttachmentsNow() } catch { /* best effort */ } }, 0)
+          const saveDraftAttachmentsNow = () => {
+            try {
+              const ids = shell?.snapshot?.attachmentIds
+              if (Array.isArray(ids)) trackedDraftAttachments.set(sessionId, [...ids])
+            } catch {
+              // ignored
+            }
+            saveTrackedDraftFiles(sessionId)
+          }
+          draftSavers.set(sessionId, (immediate) => {
+            if (immediate === true) setTimeout(saveDraftAttachmentsNow, 0)
+            else scheduleSave()
+          })
+          try {
+            if (typeof shell?.addFiles === 'function' && shell.__dshDraftTracked !== true) {
+              const originalAddFiles = shell.addFiles.bind(shell)
+              shell.addFiles = (...args) => {
+                const result = originalAddFiles(...args)
+                scheduleSave()
+                return result
+              }
+              shell.__dshDraftTracked = true
+            }
+            const removeAttachment = shell?.removeAttachment
+            if (typeof removeAttachment === 'function' && removeAttachment.__dshTracked !== true) {
+              const wrapped = (id) => {
+                const result = removeAttachment(id)
+                scheduleSave()
+                return result
+              }
+              wrapped.__dshTracked = true
+              shell.removeAttachment = wrapped
+            }
+          } catch {
+            // A frozen facade cannot be decorated; polling still tracks ids.
+          }
           return {
             sessionId,
             actions: {
@@ -621,12 +694,14 @@ window.__ModuleLoader__.load({
               /** Remember the files currently attached to this composer before unmount. */
               saveDraftAttachments: () => {
                 try {
-                  const ids = Array.isArray(shell?.snapshot?.attachmentIds) ? shell.snapshot.attachmentIds : []
-                  const files = ids.map((id) => draftFiles.get(id)).filter((file) => file !== undefined)
-                  if (ids.length > 0 && files.length === ids.length) pendingDraftFiles.set(sessionId, files)
+                  const snapshotIds = shell?.snapshot?.attachmentIds
+                  if (Array.isArray(snapshotIds)) {
+                    trackedDraftAttachments.set(sessionId, [...snapshotIds])
+                  }
                 } catch {
-                  // A disposed shell has no snapshot; the last poll already saved it.
+                  // A disposed shell has no snapshot; the tracked ids remain usable.
                 }
+                saveTrackedDraftFiles(sessionId)
               },
               /** Re-add files saved from this session's previous composer mount. */
               restoreDraftAttachments: async () => {
