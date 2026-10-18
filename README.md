@@ -6,10 +6,10 @@
 排队中的消息增加 **撤回到输入栏** 操作，而不是只能编辑、删除或插话。
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.2.1-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-19-brightgreen)
+![Checks](https://img.shields.io/badge/checks-20-brightgreen)
 
 ## 为什么
 
@@ -25,6 +25,8 @@ DSH 的排队消息行提供编辑、删除和插话三个动作。如果只是�
 - **图片附件可撤回**：优先使用临时缓存，缓存不存在时通过 Session 读取图片字节重建
 - **文件附件可撤回**：在用户选择文件、Host 上传之前，把浏览器 `File` 临时缓存到 IndexedDB；
   撤回时重新注册为草稿文件附件，让 DSH 自己重新上传
+- **包含附件的消息可编辑**：Host 原来对非文本消息禁用编辑；本插件启用编辑按钮，点击后把整条消息
+  （文本 + 附件）撤回到输入框，用户修改后重新发送
 
 ## 文件附件临时缓存
 
@@ -109,7 +111,7 @@ plugin_manager(action="install_bundle", target="<本目录的绝对路径>")
 - 图片撤回依赖会话的草稿附件注册表（`createDrafts` / `addAttachments`），DSH 升级后可能需要适配
 - 队列必须在当前会话视图中渲染；折叠时展开队列后才能看到按钮
 - 不处理子智能体不可变的队列
-- 撤回的是文本；如果草稿已有内容，会追加到末尾
+- 撤回文本时会追加到草稿末尾；附件会重新注册为草稿附件
 - DSH 客户端 API 仍是 pre-stable，DOM/属性契约随 DSH 升级可能需要适配
 
 ## 开发与测试
@@ -119,7 +121,7 @@ node scripts/check.mjs
 ```
 
 零依赖测试覆盖清单、bundle patch、locale、队列文本提取、撤回成功/失败、草稿恢复、图片附件回填、
-文件临时缓存回填、缓存清理、Host 队列行按钮注入和主题样式等 19 项检查。
+文件临时缓存回填、缓存清理、Host 队列行按钮注入和主题样式等 20 项检查。
 
 ## 许可证
 

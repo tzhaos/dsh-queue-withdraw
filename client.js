@@ -27,6 +27,7 @@ window.__ModuleLoader__.load({
       'button.attachments': '这条消息包含暂不支持的附件内容',
       'button.cacheMissing': '没有找到该文件附件的本地缓存，无法撤回',
       'button.cacheHint': '撤回文件附件（使用本插件的本地缓存）',
+      'button.editHint': '编辑包含附件的消息（会先撤回到输入栏）',
       'button.empty': '这条排队消息没有可撤回的文本',
       'button.failed': '撤回失败，消息仍在队列中',
     }
@@ -37,6 +38,7 @@ window.__ModuleLoader__.load({
       'button.attachments': 'This message contains attachment content that cannot be withdrawn',
       'button.cacheMissing': 'No local cache was found for this file attachment; it cannot be withdrawn',
       'button.cacheHint': 'Withdraw file attachment (uses this plugin\'s local cache)',
+      'button.editHint': 'Edit a message with attachments (withdraws it to the composer first)',
       'button.empty': 'This queued message has no text to withdraw',
       'button.failed': 'Withdraw failed; the message is still queued',
     }
@@ -367,6 +369,8 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return undefined
         const buttonItems = new Map()
+        const editItems = new Map()
+        const editEntries = new Set()
         let frame = null
         let disposed = false
         const cancelFrame = () => {
@@ -400,6 +404,52 @@ window.__ModuleLoader__.load({
               : tRef.current('button.tooltip'))
           button.setAttribute?.('aria-label', button.title)
         }
+        /** Withdraw one queue item through a row action. */
+        const withdrawThrough = async (button, item) => {
+          if (button.disabled) return
+          button.disabled = true
+          const accepted = await actionsRef.current.withdraw(
+            item,
+            tRef.current('button.empty'),
+            tRef.current('button.failed'),
+            tRef.current('button.attachments'),
+            tRef.current('button.cacheMissing'),
+          )
+          if (accepted !== true) button.disabled = false
+        }
+
+        /**
+         * Enable and redirect the Host edit control for attachment queues. The
+         * Host edit path only accepts text; our redirect withdraws the whole
+         * message (text + attachments) into the composer instead.
+         */
+        const syncHostEdit = (row, item) => {
+          if (typeof row.querySelectorAll !== 'function') return
+          const plan = withdrawPlan(item?.content)
+          if (plan.unsupported || plan.attachments.length === 0) return
+          let edit = null
+          for (const candidate of row.querySelectorAll('button[aria-label]')) {
+            if (candidate.hasAttribute?.('data-dsh-queue-withdraw') === true) continue
+            const label = candidate.getAttribute?.('aria-label') ?? ''
+            if (/编辑|Edit/i.test(label)) { edit = candidate; break }
+          }
+          if (edit === null) return
+          editItems.set(edit, item)
+          editEntries.add(edit)
+          edit.disabled = false
+          edit.title = tRef.current('button.editHint')
+          if (edit.hasAttribute?.('data-dshq-edit') !== true) {
+            edit.setAttribute?.('data-dshq-edit', '')
+            edit.addEventListener('click', async (event) => {
+              event.preventDefault?.()
+              event.stopImmediatePropagation?.()
+              event.stopPropagation?.()
+              const current = editItems.get(edit)
+              if (current !== undefined) await withdrawThrough(edit, current)
+            }, true)
+          }
+        }
+
         const createButton = (row, item, text) => {
           const button = document.createElement('button')
           button.type = 'button'
@@ -407,23 +457,14 @@ window.__ModuleLoader__.load({
           button.setAttribute('data-dsh-queue-withdraw', '')
           button.innerHTML = WITHDRAW_ICON
           syncButton(button, item, text)
-          button.addEventListener('click', async (event) => {
+          button.addEventListener('click', (event) => {
             event.preventDefault?.()
             event.stopPropagation?.()
-            if (button.disabled) return
             const itemId = button.dataset.dshItemId
             const current = queueRef.current.find((candidate) => String(candidate.id) === itemId)
               ?? buttonItems.get(button)
             if (current === undefined) return
-            button.disabled = true
-            const accepted = await actionsRef.current.withdraw(
-              current,
-              tRef.current('button.empty'),
-              tRef.current('button.failed'),
-              tRef.current('button.attachments'),
-              tRef.current('button.cacheMissing'),
-            )
-            if (accepted !== true) button.disabled = false
+            void withdrawThrough(button, current)
           })
           placeButton(row, button)
           return button
@@ -441,6 +482,7 @@ window.__ModuleLoader__.load({
               let button = rows[index].querySelector?.('[data-dsh-queue-withdraw]')
               if (button === null || button === undefined) button = createButton(rows[index], item, text)
               else syncButton(button, item, text)
+              syncHostEdit(rows[index], item)
             }
           }
           for (const button of [...buttonItems.keys()]) {
@@ -453,13 +495,19 @@ window.__ModuleLoader__.load({
           }
         }
         const observer = new MutationObserver(schedule)
-        observer.observe(document.body, { childList: true, subtree: true })
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
         sync()
         return () => {
           disposed = true
           observer.disconnect()
           cancelFrame()
           for (const button of [...buttonItems.keys()]) button.remove?.()
+          for (const edit of [...editEntries]) {
+            edit.disabled = true
+            edit.removeAttribute?.('data-dshq-edit')
+          }
+          editEntries.clear()
+          editItems.clear()
           buttonItems.clear()
         }
       }, [sessionId, queueMutable])

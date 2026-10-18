@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-19
+
+### Added
+
+- Messages containing image or file attachments are editable: the Host edit action is enabled and
+  redirected to withdraw the complete message into the composer, where text and attachments can be
+  changed before sending again.
+
+### Verified
+
+- `node scripts/check.mjs`: 20 checks green.
+
 ## [1.2.1] - 2026-10-19
 
 ### Changed

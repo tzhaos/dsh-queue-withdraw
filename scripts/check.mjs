@@ -43,7 +43,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.2.1')
+  assert.equal(manifest.version, '1.3.0')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -541,6 +541,19 @@ await check('clicking the injected button withdraws the queued text', async () =
   assert.equal(applied.draft.value, 'existing\n\nqueued text')
   equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
   assert(button.disabled === true, 'button disabled after acceptance')
+})
+
+await check('the Host edit control is redirected to withdraw attachments', async () => {
+  const applied = scenario({ draft: 'existing' })
+  const item = queueItem('queued text', [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }])
+  const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
+  hostEdit.disabled = true
+  mountDecoration(applied, [item])
+  assert.equal(hostEdit.disabled, false, 'edit control enabled for attachments')
+  assert.equal(hostEdit.title, '编辑包含附件的消息（会先撤回到输入栏）')
+  await hostEdit.dispatch('click')
+  assert.equal(applied.draft.value, 'existing\n\nqueued text')
+  equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
 })
 
 await check('a file-attachment queue row keeps a withdraw button ready for cache lookup', () => {

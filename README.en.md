@@ -6,10 +6,10 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client
 **withdraw back into the composer** to queued messages, instead of only edit, delete or steer.
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.2.1-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-19-brightgreen)
+![Checks](https://img.shields.io/badge/checks-20-brightgreen)
 
 ## Why
 
@@ -130,7 +130,7 @@ node scripts/check.mjs
 
 The zero-dependency suite covers manifest/patch/locale, queue extraction, successful and rejected
 withdrawal, draft restoration, image rehydration, cached file restoration, cache cleanup, Host row
-injection and theme styling — 19 checks.
+injection and theme styling — 20 checks.
 
 ## License
 
