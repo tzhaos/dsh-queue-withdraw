@@ -43,7 +43,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.2.0')
+  assert.equal(manifest.version, '1.2.1')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -194,6 +194,16 @@ class FakeNode {
   }
 
   appendChild(child) { return this.append(child) }
+
+  get firstChild() { return this.children[0] ?? null }
+
+  insertBefore(child, anchor) {
+    child.parentElement = this
+    const index = anchor === null ? this.children.length : this.children.indexOf(anchor)
+    if (index < 0) this.children.push(child)
+    else this.children.splice(index, 0, child)
+    return child
+  }
 
   remove() {
     this.isConnected = false
@@ -520,6 +530,7 @@ await check('the decoration adds one withdraw button to the Host queue row', () 
   assert(button, 'button injected')
   assert(button.innerHTML.includes('<svg'), 'icon present')
   assert.equal(button.getAttribute('aria-label'), applied.t('button.tooltip'))
+  assert.equal(applied.document._row.children[0], button, 'withdraw button stays on the leading edge')
 })
 
 await check('clicking the injected button withdraws the queued text', async () => {

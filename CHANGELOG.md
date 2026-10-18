@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-19
+
+### Changed
+
+- Moved the queue-withdraw action from the right-side action cluster to the leading edge of the
+  queued row, so it is not adjacent to edit/delete/steer and is less likely to be hit accidentally.
+
+### Verified
+
+- `node scripts/check.mjs`: 19 checks green, including the leading-edge placement assertion.
+
 ## [1.2.0] - 2026-10-18
 
 ### Added

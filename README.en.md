@@ -6,7 +6,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client
 **withdraw back into the composer** to queued messages, instead of only edit, delete or steer.
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.1-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 ![Checks](https://img.shields.io/badge/checks-19-brightgreen)
@@ -16,7 +16,8 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client
 DSH's queued-message row offers edit, delete and steer. To take a message back and adjust it, delete
 loses the content and edit is less direct than restoring the composer.
 
-`dsh-queue-withdraw` appends one withdraw action to every queued row:
+`dsh-queue-withdraw` prepends one withdraw action to every queued row (on the left, away from the
+edit/delete/steer cluster):
 
 - restores the queued text to the composer
 - removes the item through `Session.updateQueue(itemId, { kind: 'remove' })`
@@ -95,7 +96,7 @@ again.
 The plugin registers in `conversation.input.dock`, reads the `next-turn` queue through
 `useProjection('inbox')`, and uses standard Session actions:
 
-1. a MutationObserver tracks `[data-queue-dock]` and appends one compact action to each Host row;
+1. a MutationObserver tracks `[data-queue-dock]` and prepends one compact action to each Host row;
 2. the session injection decorates `conversation.createDrafts` once to cache selected `File`s;
 3. the action supports text, images and file attachments; a missing file cache leaves the queue and
    draft untouched and reports that the file must be selected again;

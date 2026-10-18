@@ -6,7 +6,7 @@
 排队中的消息增加 **撤回到输入栏** 操作，而不是只能编辑、删除或插话。
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.1-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
 ![Checks](https://img.shields.io/badge/checks-19-brightgreen)
@@ -16,7 +16,7 @@
 DSH 的排队消息行提供编辑、删除和插话三个动作。如果只是想先拿回来改一改，删除会丢失内容，
 编辑又不如直接放回输入框自然。
 
-`dsh-queue-withdraw` 在每个排队消息行追加一个撤回按钮：
+`dsh-queue-withdraw` 在每个排队消息行的**左侧**追加一个撤回按钮（避免与右侧的编辑/删除/插话按钮误触）：
 
 - 点击后把队列里的文本放回输入框
 - 通过 `Session.updateQueue(itemId, { kind: 'remove' })` 从队列移除
@@ -92,7 +92,7 @@ plugin_manager(action="install_bundle", target="<本目录的绝对路径>")
 插件注册在 `conversation.input.dock` 槽位，使用 `useProjection('inbox')` 读取 `next-turn` 队列，
 并通过标准 Session 动作完成撤回：
 
-1. 用 MutationObserver 跟踪 `[data-queue-dock]` 的渲染，给每个 Host 队列行追加一个紧凑按钮；
+1. 用 MutationObserver 跟踪 `[data-queue-dock]` 的渲染，在每个 Host 队列行的行首追加一个紧凑按钮；
 2. 在会话注入阶段装饰 `conversation.createDrafts`，缓存浏览器 `File`；
 3. 按钮支持文本、图片和文件附件；文件缓存缺失时不修改队列，并提示需要重新选择文件；
 4. 点击时先把附件和文本写入当前草稿，再调用 `updateQueue(remove)`；

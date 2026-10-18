@@ -325,15 +325,16 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Appends one action directly to the host row's action cluster.
+     * Put one action at the row's leading edge, before the queue icon and text.
      * @param {Element} row - host queue row.
-     * @returns {Element} the parent that received the action.
+     * @param {Element} button - injected action.
      */
-    function actionParentOf(row) {
-      if (typeof row.querySelectorAll !== 'function') return row
-      const buttons = [...row.querySelectorAll('button[aria-label]')]
-      const parent = buttons.at(-1)?.parentElement
-      return parent === null || parent === undefined ? row : parent
+    function placeButton(row, button) {
+      if (typeof row.insertBefore === 'function') {
+        row.insertBefore(button, row.firstChild ?? null)
+        return
+      }
+      row.append?.(button)
     }
 
     /**
@@ -424,7 +425,7 @@ window.__ModuleLoader__.load({
             )
             if (accepted !== true) button.disabled = false
           })
-          actionParentOf(row).append?.(button)
+          placeButton(row, button)
           return button
         }
         const sync = () => {
