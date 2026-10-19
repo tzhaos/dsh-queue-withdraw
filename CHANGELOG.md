@@ -1,3 +1,25 @@
+## [1.7.0] - 2026-10-19
+
+### Added
+
+- Inline queue editing through a custom editor: text, existing attachment removal, and new
+  attachment uploads all save through a Host update route that preserves image/file blocks.
+- Separate withdraw action; withdrawing now replaces the composer text and attachments instead of
+  appending to the current draft.
+- Drag-to-merge: dropping a queue row on another row's lower merge zone appends the dragged
+  message to the target tail (attachments included) through the Host route.
+- Drag a queue row onto the composer to withdraw it.
+- Queued image thumbnails open a click-to-zoom preview.
+
+### Fixed
+
+- Suppress the Host hover/tooltip on the intercepted edit control.
+- Remove the global merge button; merging is now a drag gesture.
+
+### Verified
+
+- `node scripts/check.mjs`: 26 checks green.
+
 ## [1.6.2] - 2026-10-19
 
 ### Fixed

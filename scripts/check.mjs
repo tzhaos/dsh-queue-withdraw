@@ -486,7 +486,7 @@ await check('withdraw appends text to the draft and removes the queue item', asy
   const item = queueItem('queued text')
   const ok = await applied.injected.actions.withdraw(item, 'empty', 'failed', 'attachment')
   assert.equal(ok, true)
-  assert.equal(applied.draft.value, 'existing\n\nqueued text')
+  assert.equal(applied.draft.value, 'queued text')
   equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
   equal(applied.notices, [], 'successful withdraw is silent')
 })
@@ -529,7 +529,7 @@ await check('withdraw restores a file attachment from the temporary cache', asyn
   const ok = await applied.injected.actions.withdraw(item, 'empty', 'failed', 'attachment', 'cache-missing')
   assert.equal(ok, true)
   equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
-  assert.equal(applied.draft.value, 'existing\n\nqueued text')
+  assert.equal(applied.draft.value, 'queued text')
   equal(applied.notices, [], 'successful withdraw is silent')
   assert.equal(applied.draftCalls.length, 2, 'restored file registered')
   equal(applied.addedAttachments, ['draft-1'])
@@ -546,28 +546,23 @@ await check('forgetCached drops files after their queue message leaves', async (
   equal(applied.notices, [{ level: 'error', text: 'cache-missing' }])
 })
 
-await check('the Host edit control withdraws text instead of inline editing', async () => {
+await check('the Host edit control opens the inline editor', () => {
   const applied = scenario({ draft: 'existing' })
   const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   mountDecoration(applied, [queueItem('queued text')])
   assert.equal(hostEdit.disabled, false)
-  assert.equal(hostEdit.title, '编辑并撤回到输入栏')
-  await hostEdit.dispatch('click')
-  assert.equal(applied.draft.value, 'existing\n\nqueued text')
-  equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
+  assert.equal(hostEdit.getAttribute('aria-label'), '编辑排队消息')
+  assert.equal(hostEdit.title, '')
 })
 
-await check('the Host edit control is enabled and withdraws attachment queues', async () => {
+await check('the edit control is enabled for attachment queues', () => {
   const applied = scenario({ draft: 'existing' })
   const item = queueItem('queued text', [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }])
   const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   hostEdit.disabled = true
   mountDecoration(applied, [item])
   assert.equal(hostEdit.disabled, false, 'edit control enabled for attachments')
-  assert.equal(hostEdit.title, '编辑并撤回到输入栏')
-  await hostEdit.dispatch('click')
-  assert.equal(applied.draft.value, 'existing\n\nqueued text')
-  equal(applied.updates, [{ itemId: 'item-1', action: { kind: 'remove' } }])
+  assert.equal(hostEdit.getAttribute('aria-label'), '编辑排队消息')
 })
 
 await check('unsupported queue content leaves the Host edit control disabled', () => {
@@ -579,10 +574,9 @@ await check('unsupported queue content leaves the Host edit control disabled', (
   assert.equal(hostEdit.disabled, true)
 })
 
-await check('no separate withdraw button is injected into the Host row', () => {
-  const applied = scenario()
-  mountDecoration(applied, [queueItem('queued text')])
-  assert.equal(applied.document._row.querySelector('[data-dsh-queue-withdraw]'), null)
+await check('a separate withdraw control is injected into the Host row', () => {
+  assert(clientSource.includes("data-dshq-withdraw"))
+  assert(clientSource.includes('withdrawThrough(withdraw'))
 })
 
 await check('drag uses a row ghost instead of only the handle', () => {
@@ -591,32 +585,11 @@ await check('drag uses a row ghost instead of only the handle', () => {
   assert(clientSource.includes("handle.addEventListener('pointerdown'"))
 })
 
-await check('the merge action is exposed in the queue dock', () => {
-  assert(clientSource.includes('dshqw-merge'))
-  assert(clientSource.includes('mergeQueue'))
-})
-
-await check('merging queued text edits the first item and removes the rest', async () => {
-  const applied = scenario()
-  const first = queueItem('first')
-  const second = { ...queueItem('second'), id: 'item-2' }
-  const ok = await applied.injected.actions.mergeQueue([first, second], 'failed', 'attachment')
-  assert.equal(ok, true)
-  equal(applied.updates, [
-    { itemId: 'item-1', action: { kind: 'edit', content: [{ type: 'text', text: 'first\n\nsecond' }] } },
-    { itemId: 'item-2', action: { kind: 'remove' } },
-  ])
-})
-
-await check('merging refuses queued messages with attachments', async () => {
-  const applied = scenario()
-  const first = queueItem('first')
-  const second = queueItem('second', [{ type: 'file', attachment: { attachmentId: 'file-1', name: 'notes.txt', bytes: 10 } }])
-  second.id = 'item-2'
-  const ok = await applied.injected.actions.mergeQueue([first, second], 'failed', 'attachment')
-  assert.equal(ok, false)
-  equal(applied.updates, [])
-  equal(applied.notices, [{ level: 'error', text: 'attachment' }])
+await check('drag-to-merge uses the Host update route instead of a global button', () => {
+  assert(clientSource.includes('dshqw-merge-target'))
+  assert(clientSource.includes('mergeInto'))
+  assert(clientSource.includes('/dsh-queue-withdraw/update'))
+  assert(!clientSource.includes('mergeQueue'))
 })
 
 await check('dragging a queue row posts the complete new order', async () => {
@@ -662,6 +635,7 @@ await check('composer attachments are restored after the session component unmou
 
 function hostScenario() {
   let route
+  let updateRoute
   const messages = [
     { id: 'item-1', content: [{ type: 'text', text: 'first' }] },
     { id: 'item-2', content: [{ type: 'text', text: 'second' }] },
@@ -678,11 +652,16 @@ function hostScenario() {
     effect(factory) { factory(); return () => {} },
     webServer: {
       register(definition) {
-        route = definition
+        if (String(definition.path).endsWith('/update')) updateRoute = definition
+        else route = definition
         return () => {}
       },
     },
     agents: { get: (sessionId) => sessionId === 'session-a' ? agent : undefined },
+    attachments: {
+      async saveImages(inputs) { return inputs.map((_input, index) => ({ attachmentId: 'image-new-' + String(index), mediaType: 'image/png', name: 'new.png' })) },
+      async saveFile(input) { return { attachmentId: 'file-new', name: input.name ?? 'new.bin', bytes: input.data.length } },
+    },
   }
   applyHostPlugin(ctx)
   const invoke = async (body, method = 'POST') => {
@@ -698,7 +677,14 @@ function hostScenario() {
     await route.handler(req, res)
     return { response, messages }
   }
-  return { route, invoke, messages }
+  const invokeUpdate = async (body) => {
+    const response = { status: null, headers: null, payload: null }
+    const req = { method: 'POST', async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
+    const res = { writeHead(status) { response.status = status }, end(text) { response.payload = JSON.parse(text) } }
+    await updateRoute.handler(req, res)
+    return { response, messages }
+  }
+  return { route, updateRoute, invoke, invokeUpdate, messages }
 }
 
 await check('the Host route applies a complete next-turn order through inbox.splice', async () => {
@@ -716,6 +702,35 @@ await check('the Host route rejects an order that no longer matches the queue', 
   assert.equal(response.status, 409)
   equal(response.payload, { ok: false, reason: 'queue-changed' })
   equal(messages.map((message) => message.id), ['item-1', 'item-2'])
+})
+
+await check('the Host update route merges target plus dragged content with attachments', async () => {
+  const host = hostScenario()
+  host.messages[0].content.push({ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } })
+  const { response, messages } = await host.invokeUpdate({ sessionId: 'session-a', action: 'merge', targetId: 'item-1', sourceId: 'item-2' })
+  assert.equal(response.status, 200)
+  equal(messages.map((message) => message.id), ['item-1'])
+  equal(messages[0].content, [
+    { type: 'text', text: 'first' },
+    { type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } },
+    { type: 'text', text: 'second' },
+  ])
+})
+
+await check('the Host update route replaces text and keeps existing attachments', async () => {
+  const host = hostScenario()
+  const image = { type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }
+  host.messages[0].content.push(image)
+  const { response, messages } = await host.invokeUpdate({
+    sessionId: 'session-a',
+    action: 'edit',
+    itemId: 'item-1',
+    text: 'edited',
+    blocks: [image],
+    files: [],
+  })
+  assert.equal(response.status, 200)
+  equal(messages[0].content, [{ type: 'text', text: 'edited' }, image])
 })
 
 if (process.exitCode === 1) {

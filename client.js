@@ -27,7 +27,17 @@ window.__ModuleLoader__.load({
       'button.attachments': '这条消息包含暂不支持的附件内容',
       'button.cacheMissing': '没有找到该文件附件的本地缓存，无法撤回',
       'button.cacheHint': '撤回文件附件（使用本插件的本地缓存）',
-      'button.editHint': '编辑并撤回到输入栏',
+      'button.editHint': '编辑排队消息',
+      'withdraw.tooltip': '撤回输入栏（替换输入框内容）',
+      'editor.title': '编辑排队消息',
+      'editor.placeholder': '消息内容',
+      'editor.addAttachment': '添加附件',
+      'editor.removeAttachment': '移除附件',
+      'editor.attachment': '附件',
+      'editor.cancel': '取消',
+      'editor.save': '保存',
+      'editor.failed': '保存失败，排队消息可能已变化',
+      'merge.drop': '松开以合并到此消息末尾',
       'reorder.tooltip': '拖动排序排队消息',
       'reorder.failed': '排序失败，队列可能已变化',
       'merge.label': '合并',
@@ -44,7 +54,17 @@ window.__ModuleLoader__.load({
       'button.attachments': 'This message contains attachment content that cannot be withdrawn',
       'button.cacheMissing': 'No local cache was found for this file attachment; it cannot be withdrawn',
       'button.cacheHint': 'Withdraw file attachment (uses this plugin\'s local cache)',
-      'button.editHint': 'Edit and withdraw into the composer',
+      'button.editHint': 'Edit queued message',
+      'withdraw.tooltip': 'Withdraw to input (replaces the composer)',
+      'editor.title': 'Edit queued message',
+      'editor.placeholder': 'Message content',
+      'editor.addAttachment': 'Add attachment',
+      'editor.removeAttachment': 'Remove attachment',
+      'editor.attachment': 'Attachment',
+      'editor.cancel': 'Cancel',
+      'editor.save': 'Save',
+      'editor.failed': 'Save failed; the queue may have changed',
+      'merge.drop': 'Release to merge at the end of this message',
       'reorder.tooltip': 'Drag to reorder queued messages',
       'reorder.failed': 'Reorder failed; the queue may have changed',
       'merge.label': 'Merge',
@@ -57,9 +77,12 @@ window.__ModuleLoader__.load({
 
     /** Icon used by the injected row action. */
   /** Drag handle icon. */
+  const WITHDRAW_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3v4h4"/><path d="M4.6 7A5 5 0 1 1 3.4 9.6"/></svg>'
+
   const HANDLE_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="6" cy="4" r="1"/><circle cx="10" cy="4" r="1"/><circle cx="6" cy="8" r="1"/><circle cx="10" cy="8" r="1"/><circle cx="6" cy="12" r="1"/><circle cx="10" cy="12" r="1"/></svg>'
 
   const REORDER_PATH = '/dsh-queue-withdraw/reorder'
+const UPDATE_PATH = '/dsh-queue-withdraw/update'
 
     /** Short-lived browser cache of files selected before a queue submission. */
     const CACHE_DB = 'dsh-queue-withdraw'
@@ -459,6 +482,153 @@ window.__ModuleLoader__.load({
           if (accepted !== true) button.disabled = false
         }
 
+        /** Current inline edit popover, if any. */
+        let editor = null
+        const closeEditor = () => {
+          editor?.remove?.()
+          editor = null
+        }
+        /** Read one browser File as canonical base64 (without the data URL prefix). */
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+          if (typeof FileReader !== 'function') {
+            reject(new Error('FileReader unavailable'))
+            return
+          }
+          const reader = new FileReader()
+          reader.onerror = () => reject(reader.error ?? new Error('read failed'))
+          reader.onload = () => {
+            const result = typeof reader.result === 'string' ? reader.result : ''
+            const comma = result.indexOf(',')
+            resolve(comma < 0 ? '' : result.slice(comma + 1))
+          }
+          reader.readAsDataURL(file)
+        })
+        /**
+         * Open the inline editor for one queue row. Text and every image/file
+         * attachment can be changed; new files are uploaded by the Host route.
+         * @param {Element} row - host queue row.
+         * @param {object} item - queue item.
+         */
+        const openEditor = (row, item) => {
+          closeEditor()
+          if (typeof document === 'undefined' || typeof document.createElement !== 'function') return
+          const content = Array.isArray(item?.content) ? item.content : []
+          const kept = content
+            .filter((block) => block !== null && typeof block === 'object' && (block.type === 'image' || block.type === 'file'))
+            .map((block) => ({ type: block.type, attachment: block.attachment }))
+          const added = []
+          const backdrop = document.createElement('div')
+          backdrop.className = 'dshqw-editorBackdrop'
+          const panel = document.createElement('div')
+          panel.className = 'dshqw-editor'
+          const title = document.createElement('div')
+          title.className = 'dshqw-editorTitle'
+          title.textContent = tRef.current('editor.title')
+          const textarea = document.createElement('textarea')
+          textarea.className = 'dshqw-editorText'
+          textarea.value = textOfContent(content)
+          textarea.placeholder = tRef.current('editor.placeholder')
+          const chips = document.createElement('div')
+          chips.className = 'dshqw-editorChips'
+          const renderChips = () => {
+            chips.textContent = ''
+            for (let index = 0; index < kept.length; index += 1) {
+              const block = kept[index]
+              const chip = document.createElement('span')
+              chip.className = 'dshqw-editorChip'
+              chip.textContent = String(block.attachment?.name ?? block.type)
+              const remove = document.createElement('button')
+              remove.type = 'button'
+              remove.className = 'dshqw-editorChipRemove'
+              remove.setAttribute('aria-label', tRef.current('editor.removeAttachment'))
+              remove.textContent = '×'
+              remove.addEventListener('click', () => { kept.splice(index, 1); renderChips() })
+              chip.appendChild(remove)
+              chips.appendChild(chip)
+            }
+            for (let index = 0; index < added.length; index += 1) {
+              const file = added[index]
+              const chip = document.createElement('span')
+              chip.className = 'dshqw-editorChip dshqw-editorChipNew'
+              chip.textContent = String(file.name ?? tRef.current('editor.attachment'))
+              const remove = document.createElement('button')
+              remove.type = 'button'
+              remove.className = 'dshqw-editorChipRemove'
+              remove.setAttribute('aria-label', tRef.current('editor.removeAttachment'))
+              remove.textContent = '×'
+              remove.addEventListener('click', () => { added.splice(index, 1); renderChips() })
+              chip.appendChild(remove)
+              chips.appendChild(chip)
+            }
+          }
+          renderChips()
+          const addLabel = document.createElement('label')
+          addLabel.className = 'dshqw-editorAdd'
+          addLabel.textContent = tRef.current('editor.addAttachment')
+          const input = document.createElement('input')
+          input.type = 'file'
+          input.multiple = true
+          input.className = 'dshqw-editorFile'
+          input.addEventListener('change', async () => {
+            const files = [...(input.files ?? [])]
+            input.value = ''
+            for (const file of files) {
+              try {
+                const data = await fileToBase64(file)
+                if (data === '') continue
+                added.push({ name: file.name, mediaType: file.type || 'application/octet-stream', kind: String(file.type).startsWith('image/') ? 'image' : 'file', data })
+              } catch { /* skip unreadable file */ }
+            }
+            renderChips()
+          })
+          addLabel.appendChild(input)
+          const actions = document.createElement('div')
+          actions.className = 'dshqw-editorActions'
+          const cancel = document.createElement('button')
+          cancel.type = 'button'
+          cancel.className = 'dshqw-editorCancel'
+          cancel.textContent = tRef.current('editor.cancel')
+          cancel.addEventListener('click', closeEditor)
+          const save = document.createElement('button')
+          save.type = 'button'
+          save.className = 'dshqw-editorSave'
+          save.textContent = tRef.current('editor.save')
+          save.addEventListener('click', async () => {
+            if (save.disabled) return
+            save.disabled = true
+            const accepted = await actionsRef.current.updateItem(
+              item.id,
+              textarea.value,
+              kept,
+              added,
+              tRef.current('editor.failed'),
+            )
+            save.disabled = false
+            if (accepted) closeEditor()
+          })
+          actions.append(cancel, save)
+          panel.append(title, textarea, chips, addLabel, actions)
+          backdrop.appendChild(panel)
+          backdrop.addEventListener('click', (event) => { if (event.target === backdrop) closeEditor() })
+          document.body.appendChild(backdrop)
+          editor = backdrop
+          textarea.focus?.()
+        }
+
+        /** Open one queued image preview from its existing blob URL. */
+        const openPreview = (src) => {
+          if (typeof src !== 'string' || src === '' || typeof document === 'undefined') return
+          const backdrop = document.createElement('div')
+          backdrop.className = 'dshqw-previewBackdrop'
+          const image = document.createElement('img')
+          image.className = 'dshqw-previewImage'
+          image.src = src
+          image.alt = ''
+          backdrop.appendChild(image)
+          backdrop.addEventListener('click', () => backdrop.remove())
+          document.body.appendChild(backdrop)
+        }
+
         /** Whether a pointer drag is currently moving a queue row. */
         let dragging = false
 
@@ -517,6 +687,14 @@ window.__ModuleLoader__.load({
             const offsetY = event.clientY - rowRect.top
             let ghost = null
             let started = false
+            let mergeTarget = null
+            let composerTarget = null
+            const clearDropHint = () => {
+              if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
+              if (composerTarget !== null) composerTarget.classList.remove('dshqw-drop-composer')
+              mergeTarget = null
+              composerTarget = null
+            }
             const moveGhost = (pointerEvent) => {
               if (ghost === null) return
               ghost.style.left = (pointerEvent.clientX - offsetX) + 'px'
@@ -543,11 +721,39 @@ window.__ModuleLoader__.load({
               }
               pointerEvent.preventDefault?.()
               moveGhost(pointerEvent)
-              const target = document.elementFromPoint?.(pointerEvent.clientX, pointerEvent.clientY)?.closest?.('li')
-              if (target === null || target === undefined || target === row) return
+              const hit = document.elementFromPoint?.(pointerEvent.clientX, pointerEvent.clientY)
+              const composer = hit?.closest?.('textarea, [contenteditable="true"], [data-composer], form')
+              if (composer !== null && composer !== undefined && composer.closest?.('[data-queue-dock]') === null) {
+                if (composerTarget !== composer) {
+                  if (composerTarget !== null) composerTarget.classList.remove('dshqw-drop-composer')
+                  composerTarget = composer
+                  composer.classList.add('dshqw-drop-composer')
+                }
+                if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
+                mergeTarget = null
+                return
+              }
+              if (composerTarget !== null) composerTarget.classList.remove('dshqw-drop-composer')
+              composerTarget = null
+              const target = hit?.closest?.('li')
+              if (target === null || target === undefined || target === row) {
+                if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
+                mergeTarget = null
+                return
+              }
               const rows = hostRowsOf(dock).filter((entry) => entry !== row)
               if (!rows.includes(target)) return
               const rect = target.getBoundingClientRect()
+              if (pointerEvent.clientY > rect.bottom - 14) {
+                if (mergeTarget !== target) {
+                  if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
+                  mergeTarget = target
+                  target.classList.add('dshqw-merge-target')
+                }
+                return
+              }
+              if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
+              mergeTarget = null
               const before = pointerEvent.clientY < rect.top + rect.height / 2
               target.parentNode?.insertBefore(row, before ? target : target.nextSibling)
             }
@@ -558,7 +764,28 @@ window.__ModuleLoader__.load({
               ghost?.remove?.()
               row.classList.remove('dshqw-drag-source')
               dragging = false
+              const mergeWith = mergeTarget
+              const composerDrop = composerTarget
+              clearDropHint()
               if (!started) return
+              if (mergeWith !== null) {
+                const targetHandle = mergeWith.querySelector?.('[data-dshq-handle]')
+                const targetItem = targetHandle === null || targetHandle === undefined ? undefined : handleItems.get(targetHandle)
+                if (targetItem !== undefined && String(targetItem.id) !== String(current.id)) {
+                  await actionsRef.current.mergeInto(String(targetItem.id), String(current.id), tRef.current('merge.failed'))
+                }
+                return
+              }
+              if (composerDrop !== null) {
+                await actionsRef.current.withdraw(
+                  current,
+                  tRef.current('button.empty'),
+                  tRef.current('button.failed'),
+                  tRef.current('button.attachments'),
+                  tRef.current('button.cacheMissing'),
+                )
+                return
+              }
               const order = hostRowsOf(dock).map((entry) => {
                 const entryHandle = entry.querySelector?.('[data-dshq-handle]')
                 const targetItem = entryHandle === null || entryHandle === undefined ? undefined : handleItems.get(entryHandle)
@@ -573,6 +800,23 @@ window.__ModuleLoader__.load({
             document.addEventListener?.('pointercancel', finish, true)
           })
           row.insertBefore(handle, row.firstChild ?? null)
+          let withdraw = row.querySelector?.('[data-dshq-withdraw]')
+          if (withdraw === null || withdraw === undefined) {
+            withdraw = document.createElement('button')
+            withdraw.type = 'button'
+            withdraw.className = 'dshqw-withdraw'
+            withdraw.setAttribute('data-dshq-withdraw', '')
+            withdraw.setAttribute('aria-label', tRef.current('withdraw.tooltip'))
+            withdraw.innerHTML = WITHDRAW_ICON
+            withdraw.addEventListener('click', (event) => {
+              event.preventDefault?.()
+              event.stopPropagation?.()
+              const current = row.querySelector?.('[data-dshq-handle]')
+              const target = current === null || current === undefined ? undefined : handleItems.get(current)
+              if (target !== undefined) void withdrawThrough(withdraw, target)
+            })
+            handle.after?.(withdraw)
+          }
           return handle
         }
 
@@ -597,18 +841,37 @@ window.__ModuleLoader__.load({
           editItems.set(edit, item)
           editEntries.add(edit)
           if (plan.attachments.length > 0) edit.disabled = false
-          edit.title = tRef.current('button.editHint')
+          edit.removeAttribute?.('title')
+          edit.setAttribute('aria-label', tRef.current('button.editHint'))
           if (edit.hasAttribute?.('data-dshq-edit') !== true) {
-            edit.setAttribute?.('data-dshq-edit', '')
-            edit.addEventListener('click', async (event) => {
+            edit.setAttribute('data-dshq-edit', '')
+            for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'focus']) {
+              edit.addEventListener(type, (event) => { event.stopImmediatePropagation?.() }, true)
+            }
+            edit.addEventListener('click', (event) => {
               event.preventDefault?.()
               event.stopImmediatePropagation?.()
               event.stopPropagation?.()
               const current = editItems.get(edit)
-              if (current !== undefined) await withdrawThrough(edit, current)
+              if (current !== undefined) openEditor(row, current)
             }, true)
           }
         }
+        /** Make host queue image thumbnails clickable. */
+        const syncPreviews = (row) => {
+          if (typeof row.querySelectorAll !== 'function') return
+          for (const image of row.querySelectorAll('img')) {
+            if (image.hasAttribute?.('data-dshq-preview') === true) continue
+            image.setAttribute('data-dshq-preview', '')
+            image.style.cursor = 'zoom-in'
+            image.addEventListener('click', (event) => {
+              event.preventDefault?.()
+              event.stopPropagation?.()
+              openPreview(image.getAttribute('src') ?? '')
+            }, true)
+          }
+        }
+
         const sync = () => {
           if (disposed || dragging) return
           const queueNow = mutableRef.current === true ? queueRef.current : []
@@ -623,39 +886,11 @@ window.__ModuleLoader__.load({
               if (handle === null || handle === undefined) handle = createHandle(row, item)
               else handleItems.set(handle, item)
               syncHostEdit(row, item)
+              syncPreviews(row)
             }
-            syncMergeButton(dock)
           }
         }
 
-        /** Add or refresh the merge action for one queue dock. */
-        const syncMergeButton = (dock) => {
-          if (typeof dock.appendChild !== 'function') return
-          const panel = dock.querySelector?.('[class*="panel"]') ?? dock
-          let merge = panel.querySelector?.('[data-dshq-merge]') ?? dock.querySelector?.('[data-dshq-merge]')
-          if (merge === null || merge === undefined) {
-            merge = document.createElement('button')
-            merge.type = 'button'
-            merge.className = 'dshqw-merge'
-            merge.setAttribute('data-dshq-merge', '')
-            merge.addEventListener('click', async () => {
-              if (merge.disabled === true) return
-              merge.disabled = true
-              const accepted = await actionsRef.current.mergeQueue(
-                queueRef.current,
-                tRef.current('merge.failed'),
-                tRef.current('merge.attachments'),
-              )
-              if (merge !== null) merge.disabled = false
-            })
-            panel.appendChild(merge)
-          }
-          const count = queueRef.current.length
-          merge.textContent = tRef.current('merge.label') + ' ' + String(count)
-          merge.title = tRef.current('merge.tooltip')
-          const collapsed = dock.querySelector?.('ul')?.hasAttribute?.('hidden') === true
-          merge.hidden = count < 2 || mutableRef.current !== true || collapsed
-        }
         const observer = new MutationObserver(schedule)
         observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'hidden'] })
         sync()
@@ -664,7 +899,8 @@ window.__ModuleLoader__.load({
           observer.disconnect()
           cancelFrame()
           for (const handle of document.querySelectorAll?.('[data-dshq-handle]') ?? []) handle.remove?.()
-          for (const merge of document.querySelectorAll?.('[data-dshq-merge]') ?? []) merge.remove?.()
+          for (const withdraw of document.querySelectorAll?.('[data-dshq-withdraw]') ?? []) withdraw.remove?.()
+          closeEditor()
           for (const edit of [...editEntries]) {
             if (edit.hasAttribute?.('data-dshq-edit') === true) edit.disabled = true
             edit.removeAttribute?.('data-dshq-edit')
@@ -721,21 +957,41 @@ window.__ModuleLoader__.load({
   box-shadow: var(--dsw-elevation-soft);
   overflow: hidden;
 }
-.dshqw-merge {
-  display: block;
-  margin: 0 10px 4px auto;
-  padding: 1px 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 999px;
+.dshqw-withdraw {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
-  font: inherit;
-  font-size: 11px;
-  line-height: 16px;
   cursor: pointer;
+  opacity: .55;
 }
-.dshqw-merge:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dshqw-merge[hidden] { display: none; }
+.dshqw-withdraw:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); opacity: 1; }
+button[data-dshq-edit]:hover { background: transparent !important; }
+.dshqw-editorBackdrop { position: fixed; inset: 0; z-index: 160; display: grid; place-items: center; background: rgba(0,0,0,.18); }
+.dshqw-editor { width: min(420px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 48px)); overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-elevation-soft); color: var(--dsw-alias-label-primary); }
+.dshqw-editorTitle { font-size: 13px; font-weight: 600; }
+.dshqw-editorText { min-height: 110px; resize: vertical; padding: 7px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-base); color: inherit; font: inherit; }
+.dshqw-editorChips { display: flex; flex-wrap: wrap; gap: 6px; }
+.dshqw-editorChip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; font-size: 11px; }
+.dshqw-editorChipNew { border-style: dashed; }
+.dshqw-editorChipRemove { border: 0; background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; padding: 0 1px; font: inherit; }
+.dshqw-editorAdd { align-self: flex-start; font-size: 12px; color: var(--dsw-alias-state-business-primary); cursor: pointer; }
+.dshqw-editorFile { display: none; }
+.dshqw-editorActions { display: flex; justify-content: flex-end; gap: 8px; }
+.dshqw-editorCancel,.dshqw-editorSave { border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; padding: 4px 10px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; cursor: pointer; }
+.dshqw-editorSave { background: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-inverse); border-color: transparent; }
+.dshqw-editorSave:disabled { opacity: .5; cursor: default; }
+.dshqw-merge-target { outline: 2px dashed var(--dsw-alias-state-business-primary); outline-offset: -2px; border-radius: 8px; }
+.dshqw-drop-composer { outline: 2px dashed var(--dsw-alias-state-business-primary) !important; outline-offset: 2px; }
+.dshqw-previewBackdrop { position: fixed; inset: 0; z-index: 170; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.55); cursor: zoom-out; }
+.dshqw-previewImage { max-width: min(92vw, 1200px); max-height: 88vh; object-fit: contain; border-radius: 8px; box-shadow: var(--dsw-elevation-soft); }
 `
 
     /**
@@ -893,39 +1149,50 @@ window.__ModuleLoader__.load({
                 }
               },
               /**
-               * Merge queued pure-text messages into the first one. Attachments
-               * are refused because the Host's queue edit accepts text only.
-               * @param {object[]} items - current next-turn queue.
-               * @param {string} failure - merge failure notice.
-               * @param {string} attachment - attachment refusal notice.
-               * @returns {Promise<boolean>} whether the queue was merged.
+               * Replace one queue item's text and attachments through the Host route.
+               * @param {string} itemId - queue item id.
+               * @param {string} text - edited text.
+               * @param {object[]} blocks - kept image/file blocks.
+               * @param {object[]} files - new uploads as base64.
+               * @param {string} failure - failure notice.
+               * @returns {Promise<boolean>} whether the Host applied the edit.
                */
-              mergeQueue: async (items, failure, attachment) => {
-                const list = Array.isArray(items) ? items : []
-                if (list.length < 2) return false
-                const plans = list.map((entry) => ({ item: entry, plan: withdrawPlan(entry?.content) }))
-                if (plans.some((entry) => entry.plan.unsupported || entry.plan.attachments.length > 0)) {
-                  notify('error', attachment)
-                  return false
-                }
-                const texts = plans.map((entry) => entry.plan.text).filter((text) => text.trim() !== '')
-                if (texts.length < 2) return false
-                const binding = ctx.sessions.binding(sessionId)
-                const session = binding?.session
-                if (session === undefined || typeof session.updateQueue !== 'function') {
+              updateItem: async (itemId, text, blocks, files, failure) => {
+                try {
+                  const response = await fetch(UPDATE_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId, action: 'edit', itemId, text, blocks, files }),
+                  })
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true) {
+                    notify('error', failure)
+                    return false
+                  }
+                  return true
+                } catch {
                   notify('error', failure)
                   return false
                 }
-                const merged = texts.join('\n\n')
+              },
+              /**
+               * Append one queued message to another and remove the source.
+               * @param {string} targetId - receiving queue item.
+               * @param {string} sourceId - dragged queue item.
+               * @param {string} failure - failure notice.
+               * @returns {Promise<boolean>} whether the Host merged them.
+               */
+              mergeInto: async (targetId, sourceId, failure) => {
                 try {
-                  const first = await session.updateQueue(list[0].id, {
-                    kind: 'edit',
-                    content: [{ type: 'text', text: merged }],
+                  const response = await fetch(UPDATE_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId, action: 'merge', targetId, sourceId }),
                   })
-                  if (first?.accepted !== true && first?.ok !== true) throw new Error('merge rejected')
-                  for (const entry of list.slice(1)) {
-                    const removed = await session.updateQueue(entry.id, { kind: 'remove' })
-                    if (removed?.accepted !== true && removed?.ok !== true) throw new Error('remove rejected')
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true) {
+                    notify('error', failure)
+                    return false
                   }
                   return true
                 } catch {
@@ -967,6 +1234,11 @@ window.__ModuleLoader__.load({
                 }
                 let changedDraft = false
                 const addedIds = []
+                const previousIds = []
+                try {
+                  const ids = shell?.snapshot?.attachmentIds
+                  if (Array.isArray(ids)) previousIds.push(...ids)
+                } catch { /* no snapshot */ }
                 const releaseAdded = () => {
                   for (const id of addedIds) {
                     try { shell?.actions?.removeAttachment?.(id) } catch { /* best-effort */ }
@@ -977,7 +1249,15 @@ window.__ModuleLoader__.load({
                   releaseAdded()
                   if (changedDraft) {
                     try { shell?.actions?.setDraft?.(previousDraft) } catch { /* best-effort restore */ }
+                    try {
+                      if (previousIds.length > 0) shell?.actions?.addAttachments?.(previousIds)
+                    } catch { /* best-effort restore */ }
                   }
+                }
+                // Withdraw replaces the composer: clear its current attachments
+                // before restoring the queued message's attachments.
+                for (const id of previousIds) {
+                  try { shell?.removeAttachment?.(id) } catch { /* best-effort */ }
                 }
                 const cachedRecords = []
                 if (plan.attachments.length > 0) {
@@ -1026,18 +1306,13 @@ window.__ModuleLoader__.load({
                     return false
                   }
                 }
-                if (plan.text !== '') {
-                  try {
-                    const nextDraft = previousDraft.trim() === ''
-                      ? plan.text
-                      : previousDraft.replace(/\s+$/, '') + '\n\n' + plan.text
-                    shell?.actions?.setDraft?.(nextDraft)
-                    changedDraft = true
-                  } catch {
-                    rollback()
-                    notify('error', failure)
-                    return false
-                  }
+                try {
+                  shell?.actions?.setDraft?.(plan.text)
+                  changedDraft = true
+                } catch {
+                  rollback()
+                  notify('error', failure)
+                  return false
                 }
                 try {
                   const result = await session.updateQueue(item.id, { kind: 'remove' })
