@@ -1,3 +1,14 @@
+## [1.7.1] - 2026-10-19
+
+### Fixed
+
+- Sync the package version with the 1.7.0 behavior release after a concurrent profile/docs edit.
+- README now describes inline editing, separate withdraw, drag-merge and attachment previews.
+
+### Verified
+
+- `node scripts/check.mjs`: 26 checks green.
+
 ## [1.7.0] - 2026-10-19
 
 ### Added

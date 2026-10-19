@@ -974,6 +974,9 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
 }
 .dshqw-withdraw:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); opacity: 1; }
 button[data-dshq-edit]:hover { background: transparent !important; }
+[data-queue-dock] button:not([data-dshq-handle]):not([data-dshq-withdraw]):not([data-dshq-edit]):hover {
+  background: transparent !important;
+}
 .dshqw-editorBackdrop { position: fixed; inset: 0; z-index: 160; display: grid; place-items: center; background: rgba(0,0,0,.18); }
 .dshqw-editor { width: min(420px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 48px)); overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-elevation-soft); color: var(--dsw-alias-label-primary); }
 .dshqw-editorTitle { font-size: 13px; font-weight: 600; }
