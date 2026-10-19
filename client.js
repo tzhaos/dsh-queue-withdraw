@@ -30,6 +30,10 @@ window.__ModuleLoader__.load({
       'button.editHint': '编辑并撤回到输入栏',
       'reorder.tooltip': '拖动排序排队消息',
       'reorder.failed': '排序失败，队列可能已变化',
+      'merge.label': '合并',
+      'merge.tooltip': '把纯文本排队消息合并成一条',
+      'merge.failed': '合并失败，队列可能已变化',
+      'merge.attachments': '含附件的排队消息无法合并',
       'button.empty': '这条排队消息没有可撤回的文本',
       'button.failed': '撤回失败，消息仍在队列中',
     }
@@ -43,7 +47,7 @@ window.__ModuleLoader__.load({
       'button.editHint': 'Edit and withdraw into the composer',
       'reorder.tooltip': 'Drag to reorder queued messages',
       'reorder.failed': 'Reorder failed; the queue may have changed',
-      'merge.label': 'Merge queued messages',
+      'merge.label': 'Merge',
       'merge.tooltip': 'Merge the queued text messages into one',
       'merge.failed': 'Merge failed; the queue may have changed',
       'merge.attachments': 'Messages with attachments cannot be merged',
@@ -627,7 +631,8 @@ window.__ModuleLoader__.load({
         /** Add or refresh the merge action for one queue dock. */
         const syncMergeButton = (dock) => {
           if (typeof dock.appendChild !== 'function') return
-          let merge = dock.querySelector?.('[data-dshq-merge]')
+          const panel = dock.querySelector?.('[class*="panel"]') ?? dock
+          let merge = panel.querySelector?.('[data-dshq-merge]') ?? dock.querySelector?.('[data-dshq-merge]')
           if (merge === null || merge === undefined) {
             merge = document.createElement('button')
             merge.type = 'button'
@@ -643,10 +648,10 @@ window.__ModuleLoader__.load({
               )
               if (merge !== null) merge.disabled = false
             })
-            dock.appendChild(merge)
+            panel.appendChild(merge)
           }
           const count = queueRef.current.length
-          merge.textContent = tRef.current('merge.label') + (count > 1 ? ' (' + String(count) + ')' : '')
+          merge.textContent = tRef.current('merge.label') + ' ' + String(count)
           merge.title = tRef.current('merge.tooltip')
           merge.hidden = count < 2 || mutableRef.current !== true
         }
@@ -716,16 +721,16 @@ window.__ModuleLoader__.load({
   overflow: hidden;
 }
 .dshqw-merge {
-  align-self: flex-start;
-  margin: 4px 0 0 24px;
-  padding: 2px 8px;
-  border: 0;
-  border-radius: 6px;
+  display: block;
+  margin: 0 10px 4px auto;
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
   font: inherit;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 11px;
+  line-height: 16px;
   cursor: pointer;
 }
 .dshqw-merge:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }

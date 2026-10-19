@@ -1,3 +1,16 @@
+## [1.6.1] - 2026-10-19
+
+### Fixed
+
+- Add the missing Chinese merge labels; the queue action no longer falls back to English.
+- Put the merge action inside the queue card as a small footer chip instead of appending an
+  unlabeled text line to the dock.
+- Shorten the label to `合并 N` / `Merge N`.
+
+### Verified
+
+- `node scripts/check.mjs`: 26 checks green.
+
 ## [1.6.0] - 2026-10-19
 
 ### Added
