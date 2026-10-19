@@ -1,6 +1,6 @@
 {
   "name": "dsh-queue-withdraw",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "private": true,
   "description": "Withdraw a queued composer message back into the draft instead of only editing, deleting or steering it.",
   "type": "module",

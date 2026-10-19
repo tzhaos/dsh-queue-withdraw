@@ -1,3 +1,14 @@
+## [1.6.2] - 2026-10-19
+
+### Fixed
+
+- Hide the merge footer while the queue list is collapsed; observe the list's `hidden` attribute so
+  the collapsed card stays compact.
+
+### Verified
+
+- `node scripts/check.mjs`: 26 checks green.
+
 ## [1.6.1] - 2026-10-19
 
 ### Fixed

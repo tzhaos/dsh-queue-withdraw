@@ -653,10 +653,11 @@ window.__ModuleLoader__.load({
           const count = queueRef.current.length
           merge.textContent = tRef.current('merge.label') + ' ' + String(count)
           merge.title = tRef.current('merge.tooltip')
-          merge.hidden = count < 2 || mutableRef.current !== true
+          const collapsed = dock.querySelector?.('ul')?.hasAttribute?.('hidden') === true
+          merge.hidden = count < 2 || mutableRef.current !== true || collapsed
         }
         const observer = new MutationObserver(schedule)
-        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] })
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'hidden'] })
         sync()
         return () => {
           disposed = true
