@@ -2,13 +2,13 @@
 
 简体中文 | [English](README.en.md)
 
-一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 客户端插件：给输入区排队中的消息增加 **撤回编辑** 和 **拖动排序**。
+一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 客户端插件：给输入区排队中的消息增加 **撤回编辑**、**拖动排序** 和 **锁定**。
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.5.1-blue)
+![Version](https://img.shields.io/badge/version-1.11.5-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-22-brightgreen)
+![Checks](https://img.shields.io/badge/checks-40-brightgreen)
 
 ## 为什么
 
@@ -17,9 +17,13 @@ DSH 的排队消息行提供编辑、删除和插话三个动作。编辑只支�
 
 `dsh-queue-withdraw` 把编辑统一变成“撤回后编辑”，并在行首提供拖动排序：
 
-- 点击 Host 的编辑图标：打开自定义编辑器，改文字、删除附件或添加新附件
-- 独立撤回按钮：把整条消息放回输入框，并替换输入框原有内容和附件
-- 行首拖动把手：拖动排队消息调整发送顺序；拖到另一行底部合并，拖到输入框撤回
+- 点击 Host 的编辑图标：文本消息直接使用宿主原生的行内编辑器（插件只把宿主会丢弃的附件块补回去）；只有纯附件消息（宿主禁用编辑）才回退到插件编辑器
+- 独立撤回按钮：位于行最右端（原生操作按钮之后），把整条消息放回输入框，并替换输入框原有内容和附件
+- 每条排队消息在原生操作按钮左侧有一个小锁：点击上锁、再点解锁，只作用于这一条
+- 锁住的消息：文字加删除线、不能编辑；**本轮结束不自动发送**，但仍在队列里，可以撤回
+- 解锁后立即回到队列，下一次回合结束就会正常发送
+- 锁定状态由宿主持有并持久化到 `$DSH_HOME/queue-withdraw-frozen.json`，应用重启后仍然有效
+- 整行可拖：没有拖拽把手图标，直接在行上按住拖动即可调整发送顺序；拖到另一行底部合并，拖到输入框撤回（按钮、编辑框、图片点击仍走自己的行为）
 - 通过 `Session.updateQueue(itemId, { kind: 'remove' })` 从队列移除
 - 如果输入框已有草稿，会把消息追加到草稿末尾，而不是覆盖
 - 移除失败会把草稿恢复到操作前，消息仍在队列里
@@ -60,6 +64,18 @@ DSH 的排队消息行提供编辑、删除和插话三个动作。编辑只支�
 3. 通过会话草稿附件注册表把附件重新加入草稿，再把文本追加到当前草稿；
 4. 调用公开的 `session.updateQueue(itemId, { kind: 'remove' })`；
 5. Host 接受后队列行消失，草稿已经能看到内容，因此成功时**不弹持久提示**；失败才恢复原草稿并提示。
+
+点击锁定的流程：
+
+1. 调用同源路由 `POST /dsh-queue-withdraw/freeze`，Host 校验该 id 仍在 `next-turn` 里，并记录到宿主的锁定集合；
+2. 集合持久化在 `$DSH_HOME/queue-withdraw-frozen.json`，进程重启后自动加载；
+3. Host 在 Inbox 的 `claim`（回合结束时取用队列）上打补丁：遇到锁定 id 就跳过，取后面第一条未锁定的消息；全部锁定时这一轮不取任何排队消息；
+4. 消息本身**没有离开 `next-turn`**，所以队列行、拖动把手、撤回、宿主的删除/插话都照常工作；
+5. 客户端给这一行加 `dshqw-locked-row`（文字加删除线）、禁用该行的编辑按钮，并把行尾的小锁切成闭合图标；
+6. 再次点击小锁调用 `POST /dsh-queue-withdraw/thaw` 把 id 移出集合，这一条立即回到可发送的队列，下一次回合结束就会正常发送；
+7. 撤回一条锁定消息时，插件会顺带把它的 id 移出集合，避免留下无效锁。
+
+已知风险：拦截靠宿主侧原型补丁。正常桌面使用中，Host 启动时会尝试给已有 agent 打补丁、并写盘持久化 id；只有极端情况（例如只跑 Host 而从不启动 Web 客户端，导致补丁没装上）锁定项才会被当普通消息发出。
 
 ## 安装
 

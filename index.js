@@ -6,12 +6,129 @@
  * narrow same-origin route: it accepts the complete next-turn id order and
  * applies it atomically after verifying the ids still match the live queue.
  *
+ * Freezing keeps a message inside `next-turn` (so every queue control still
+ * works on it) and only stops the turn boundary from claiming it. The held ids
+ * live in this Host half, are persisted under `$DSH_HOME`, and are enforced by
+ * wrapping the inbox `claim` entry point.
+ *
  * @module dsh-queue-withdraw
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 const REORDER_PATH = '/dsh-queue-withdraw/reorder'
 const UPDATE_PATH = '/dsh-queue-withdraw/update'
+const FREEZE_PATH = '/dsh-queue-withdraw/freeze'
+const THAW_PATH = '/dsh-queue-withdraw/thaw'
+const FROZEN_PATH = '/dsh-queue-withdraw/frozen'
+const DIAG_PATH = '/dsh-queue-withdraw/diag'
 const MAX_BODY = 32 * 1024 * 1024
+
+/** Per-session ids the loop must not claim; mirrored to `$DSH_HOME`. */
+const frozenSessions = new Map()
+
+/** @returns {string} the layout-diagnostic log path. */
+function diagFile() {
+  const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== ''
+    ? process.env.DSH_HOME
+    : path.join(os.homedir(), '.dsh')
+  return path.join(home, 'queue-withdraw-diag.jsonl')
+}
+
+/** @returns {string} the persistent frozen-id file. */
+function frozenFile() {
+  const home = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== ''
+    ? process.env.DSH_HOME
+    : path.join(os.homedir(), '.dsh')
+  return path.join(home, 'queue-withdraw-frozen.json')
+}
+
+/** Load the persisted frozen ids once per Host process. */
+function loadFrozen() {
+  try {
+    const raw = fs.readFileSync(frozenFile(), 'utf8')
+    const parsed = JSON.parse(raw)
+    const sessions = parsed !== null && typeof parsed === 'object' ? parsed.sessions : undefined
+    if (sessions === null || typeof sessions !== 'object') return
+    for (const [sessionId, ids] of Object.entries(sessions)) {
+      if (!Array.isArray(ids)) continue
+      frozenSessions.set(sessionId, new Set(ids.filter((id) => typeof id === 'string')))
+    }
+  } catch {
+    // A missing or unreadable file simply starts with nothing frozen.
+  }
+}
+
+/** Persist the current frozen ids. */
+function saveFrozen() {
+  const sessions = {}
+  for (const [sessionId, ids] of frozenSessions) {
+    if (ids.size > 0) sessions[sessionId] = [...ids]
+  }
+  try {
+    fs.mkdirSync(path.dirname(frozenFile()), { recursive: true })
+    fs.writeFileSync(frozenFile(), JSON.stringify({ version: 1, sessions }, null, 2) + '\n', 'utf8')
+  } catch {
+    // The in-memory set still enforces this process lifetime.
+  }
+}
+
+/**
+ * @param {string} sessionId - conversation id.
+ * @returns {Set<string>} held message ids.
+ */
+function frozenIdsOf(sessionId) {
+  let ids = frozenSessions.get(sessionId)
+  if (ids === undefined) {
+    ids = new Set()
+    frozenSessions.set(sessionId, ids)
+  }
+  return ids
+}
+
+/**
+ * Wrap the inbox claim entry so held ids are skipped instead of sent. The patch
+ * sits on the shared prototype, so it covers every agent created afterwards.
+ * @param {object} inbox - one agent's durable inbox.
+ */
+function installClaimPatch(inbox) {
+  if (inbox === null || inbox === undefined || typeof inbox !== 'object') return
+  const proto = Object.getPrototypeOf(inbox)
+  if (proto === null || typeof proto.claim !== 'function') return
+  if (proto.__dshQueueWithdrawClaimPatched === true) return
+  const original = proto.claim
+  proto.claim = function patchedClaim(target, turn) {
+    if (target !== 'next-turn') return original.call(this, target, turn)
+    const held = frozenIdsOf(this.session?.id)
+    if (held.size === 0) return original.call(this, target, turn)
+    const claimed = this.mutate('next-step', 0, this.nextStep.length, [], false)
+    const queue = this.nextTurn
+    const index = queue.findIndex((message) => !held.has(String(message.id)))
+    if (index >= 0) claimed.push(...this.mutate('next-turn', index, 1, [], false))
+    for (const message of claimed) this.dispatch.emit('agent/inbox/claimed', { message, turn })
+    return claimed
+  }
+  Object.defineProperty(proto, '__dshQueueWithdrawClaimPatched', { value: true, enumerable: false })
+}
+
+/**
+ * Patch every agent the Host can currently reach.
+ * @param {object} ctx - Host context.
+ */
+function armAgents(ctx) {
+  try {
+    const state = ctx.sessions?.list?.getSnapshot?.()
+    const ids = Array.isArray(state?.ids) ? state.ids : Object.keys(state?.byId ?? {})
+    for (const sessionId of ids) {
+      const agent = ctx.agents?.get?.(sessionId)
+      if (agent?.inbox !== undefined) installClaimPatch(agent.inbox)
+    }
+  } catch {
+    // The claim patch is also installed by every freeze/thaw/arm request.
+  }
+}
 
 /**
  * @param {object} res - Node response.
@@ -90,6 +207,8 @@ async function saveUpload(attachments, file) {
  */
 export function apply(ctx) {
   if (ctx?.webServer?.register === undefined || ctx?.agents?.get === undefined) return
+  loadFrozen()
+  armAgents(ctx)
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: REORDER_PATH,
@@ -215,6 +334,116 @@ export function apply(ctx) {
       }
     },
   }), 'queue-withdraw: update route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: FREEZE_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, reason: 'method-not-allowed' })
+        return
+      }
+      const body = await readJson(req)
+      if (body === null || typeof body !== 'object') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-body' })
+        return
+      }
+      const sessionId = body.sessionId
+      const itemId = body.itemId
+      if (typeof sessionId !== 'string' || sessionId === ''
+        || typeof itemId !== 'string' || itemId === '') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-request' })
+        return
+      }
+      const agent = ctx.agents.get(sessionId)
+      if (agent === undefined || agent?.inbox === undefined) {
+        sendJson(res, 409, { ok: false, reason: 'agent-unavailable' })
+        return
+      }
+      installClaimPatch(agent.inbox)
+      const current = [...agent.inbox.nextTurn]
+      const index = current.findIndex((message) => String(message.id) === itemId)
+      if (index < 0) {
+        sendJson(res, 409, { ok: false, reason: 'queue-changed' })
+        return
+      }
+      // The message stays queued so every native control still works; only the
+      // turn boundary is told to skip it.
+      frozenIdsOf(sessionId).add(itemId)
+      saveFrozen()
+      sendJson(res, 200, { ok: true, index })
+    },
+  }), 'queue-withdraw: freeze route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: THAW_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, reason: 'method-not-allowed' })
+        return
+      }
+      const body = await readJson(req)
+      if (body === null || typeof body !== 'object') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-body' })
+        return
+      }
+      const sessionId = body.sessionId
+      const itemId = String(body.itemId ?? '')
+      if (typeof sessionId !== 'string' || sessionId === '' || itemId === '') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-request' })
+        return
+      }
+      frozenIdsOf(sessionId).delete(itemId)
+      saveFrozen()
+      sendJson(res, 200, { ok: true })
+    },
+  }), 'queue-withdraw: thaw route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: FROZEN_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, reason: 'method-not-allowed' })
+        return
+      }
+      const body = await readJson(req)
+      const sessionId = body !== null && typeof body === 'object' ? body.sessionId : undefined
+      if (typeof sessionId !== 'string' || sessionId === '') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-request' })
+        return
+      }
+      const agent = ctx.agents.get(sessionId)
+      if (agent?.inbox !== undefined) installClaimPatch(agent.inbox)
+      sendJson(res, 200, { ok: true, ids: [...frozenIdsOf(sessionId)] })
+    },
+  }), 'queue-withdraw: frozen route')
+
+  // Temporary layout probe: the client reports the geometry whenever visible
+  // space appears between the queue dock and the composer.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: DIAG_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, reason: 'method-not-allowed' })
+        return
+      }
+      const body = await readJson(req)
+      if (body === null || typeof body !== 'object') {
+        sendJson(res, 400, { ok: false, reason: 'invalid-body' })
+        return
+      }
+      try {
+        fs.mkdirSync(path.dirname(diagFile()), { recursive: true })
+        fs.appendFileSync(diagFile(), JSON.stringify({ at: new Date().toISOString(), ...body }) + '\n', 'utf8')
+      } catch {
+        // A failed diagnostic write never affects the conversation.
+      }
+      sendJson(res, 200, { ok: true })
+    },
+  }), 'queue-withdraw: layout diagnostic route')
 }
 
-export const inject = ['webServer', 'agents', 'attachments']
+export const inject = ['webServer', 'agents', 'sessions', 'attachments']

@@ -1,3 +1,174 @@
+## [1.11.5] - 2026-10-19
+
+### Changed
+
+- Swapped the two injected actions: the lock now sits just before the Host action cluster, and the
+  withdraw action sits at the row's trailing edge after it. Both keep the 28x28 geometry.
+
+### Verified
+
+- `node scripts/check.mjs`: 40 checks green.
+
+## [1.11.4] - 2026-10-19
+
+### Fixed
+
+- Row actions now match the Host icons geometrically, measured from real screenshots:
+  - the lock button still carried a leftover `20x22` override, so its hit box and hover circle were
+    smaller than the Host's `28x28` action and its centre sat 34px from the neighbour instead of 38px.
+    The override is gone; both injected actions are `28x28` circles.
+  - the lock/unlock/withdraw glyphs were drawn inside a padded 16-unit viewBox, so their visible
+    strokes were ~11-12px wide against the Host's 13-15px. Both icons now use a tight viewBox that
+    fills the 14px icon box.
+
+### Verified
+
+- `node scripts/check.mjs`: 40 checks green.
+
+## [1.11.3] - 2026-10-19
+
+### Fixed
+
+- Submit-time jitter: the live probe showed the Host re-creates queue rows when the queue changes, so
+  the injected actions are re-added. The withdraw action used to sit at the leading edge, pushing the
+  text right whenever it was re-created. It now sits next to the native action cluster, so the left
+  text edge never moves and only the trailing icons are re-added.
+
+### Added
+
+- Diagnostics extended for the jitter hunt: `row-replaced` (item moved to a new DOM row node),
+  `text-shift` (preview text moved between the two injections), and `dock-geometry` now also carries
+  whether the header is mounted and whether the list is hidden.
+
+## [1.11.2] - 2026-10-19
+
+### Added
+
+- Temporary jitter diagnostics: `decorate` (per-row action creation, with a `recreated` flag for
+  churn), `buttons-dropped` (a decorated row lost its actions), and `dock-geometry` (dock top/height/
+  row/echo-count changes). They append to the same `$DSH_HOME/queue-withdraw-diag.jsonl` sink; remove
+  once the submit-time jitter is understood.
+
+## [1.11.1] - 2026-10-19
+
+### Fixed
+
+- Withdraw and lock now match the Host's action buttons exactly: 28x28 circle, 14px tertiary glyph,
+  the same hover pill, focus ring and disabled treatment (no extra base opacity).
+- The dock no longer flashes or shifts when a queued message is submitted or edited:
+  - decoration now runs inside the MutationObserver callback (right after React commits, before
+    paint) instead of a later animation frame, so a freshly rendered row never paints without its
+    actions;
+  - the lock button is appended only when it is created, not re-appended whenever React re-renders
+    the row around it;
+  - the layout diagnostic probe is deferred to an animation frame instead of forcing layout inside
+    the commit path.
+
+### Verified
+
+- `node scripts/check.mjs`: 38 checks green.
+
+## [1.11.0] - 2026-10-19
+
+### Changed
+
+- Removed the drag handle icon. The whole queue row is now the drag source: pressing and moving more
+  than 3px starts the drag with the same ghost, drop hints, merge and composer-withdraw targets.
+  Buttons, the inline editor and images keep their own presses, and the row shows a grab cursor.
+
+### Verified
+
+- `node scripts/check.mjs`: 38 checks green.
+
+## [1.10.2] - 2026-10-19
+
+### Added
+
+- Temporary layout probe: when visible space appears between the queue dock and the composer, the
+  client posts the dock/composer geometry to `POST /dsh-queue-withdraw/diag`, which appends it to
+  `$DSH_HOME/queue-withdraw-diag.jsonl`. Used to pin the intermittent dock/composer gap; remove once
+  the cause is fixed.
+
+## [1.10.1] - 2026-10-19
+
+### Changed
+
+- Hide the Host's own per-row queue icon (`[class*="lead"]` inside a dock row). It is only rendered
+  when a single message is queued, and the injected leading actions make it redundant.
+
+### Verified
+
+- `node scripts/check.mjs`: 38 checks green.
+
+## [1.10.0] - 2026-10-19
+
+### Changed
+
+- Freeze is now **lock**. Each queued message gets a small lock at the dock's trailing edge, outside
+  the native action cluster, and it locks or unlocks that one message.
+- A locked message is struck through and its Host edit control is disabled; the blue edge indicator is
+  gone. Locked messages stay queued but the Host claim skips them, so they are not auto-sent; they can
+  still be withdrawn and reordered.
+- Unlocking drops the id from the Host set, so the message is immediately sendable again at the next
+  turn boundary.
+- Withdrawing a locked message also drops its lock id.
+
+### Verified
+
+- `node scripts/check.mjs`: 38 checks green.
+
+## [1.9.1] - 2026-10-19
+
+### Changed
+
+- Queued text messages now use the Host's own inline editor; the plugin no longer intercepts the
+  edit control. It only wraps `conversation.updateQueue` so a native text edit keeps the message's
+  existing image/file blocks.
+- The plugin editor remains only as a fallback for attachment-only messages, where the Host disables
+  editing.
+
+### Verified
+
+- `node scripts/check.mjs`: 37 checks green.
+
+## [1.9.0] - 2026-10-19
+
+### Changed
+
+- Freezing no longer removes the message from `next-turn`: the Host keeps a persisted held-id set and
+  the inbox `claim` entry skips those ids at the turn boundary, so every native queue control keeps
+  working and the message simply is not auto-submitted.
+- The frozen row is the native row with a `dshqw-frozen-row` marker (fainter text, no strike-through)
+  and the snowflake switched to `Unfreeze`.
+
+### Added
+
+- Host routes `POST /dsh-queue-withdraw/freeze` (adds the id), `POST /dsh-queue-withdraw/thaw`
+  (removes it) and `POST /dsh-queue-withdraw/frozen` (lists this conversation's ids).
+- Held ids persist to `$DSH_HOME/queue-withdraw-frozen.json` and are re-loaded on boot.
+
+### Verified
+
+- `node scripts/check.mjs`: 35 checks green.
+
+## [1.8.0] - 2026-10-19
+
+### Added
+
+- Freeze action on every queued row: the message is held out of `next-turn` (so the ending turn does
+  not send it) while a disabled placeholder row stays at its slot in the queue list.
+- Host routes `POST /dsh-queue-withdraw/freeze` (returns the message and its slot) and
+  `POST /dsh-queue-withdraw/thaw` (re-inserts at the saved slot, clamped).
+- In-list frozen row keeps every queue control (handle, withdraw, Host edit/delete/steer) but
+  disables them, and turns the snowflake into `Unfreeze`; when every message is frozen the Host
+  unmounts its dock, so the plugin renders a fallback in the same slot that reuses the class names
+  and button glyphs captured from the live Host dock (native look), hidden by
+  `body:has([data-queue-dock])` while the Host dock is mounted.
+
+### Verified
+
+- `node scripts/check.mjs`: 37 checks green.
+
 ## [1.7.1] - 2026-10-19
 
 ### Fixed

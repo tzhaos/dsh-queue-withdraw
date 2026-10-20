@@ -1,8 +1,8 @@
 {
   "name": "dsh-queue-withdraw",
-  "version": "1.7.1",
+  "version": "1.11.5",
   "private": true,
-  "description": "Withdraw a queued composer message back into the draft instead of only editing, deleting or steering it.",
+  "description": "Withdraw, edit, reorder or lock a queued composer message; locked messages stay queued but are skipped at the turn boundary.",
   "type": "module",
   "main": "index.js",
   "exports": {

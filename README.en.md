@@ -3,13 +3,13 @@
 [简体中文](README.md) | English
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web client plugin that adds
-**edit-by-withdraw** and **drag reordering** to queued messages.
+**edit-by-withdraw**, **drag reordering** and **locking** to queued messages.
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1--rc.2-4D6BFE)
-![Version](https://img.shields.io/badge/version-1.5.1-blue)
+![Version](https://img.shields.io/badge/version-1.11.5-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
-![Checks](https://img.shields.io/badge/checks-22-brightgreen)
+![Checks](https://img.shields.io/badge/checks-40-brightgreen)
 
 ## Why
 
@@ -18,8 +18,18 @@ with attachments cannot be changed; the queue also sends strictly in submission 
 
 `dsh-queue-withdraw` makes every edit a withdraw and adds a leading drag handle:
 
-- clicking the Host edit icon restores the whole message (text + attachments) to the composer
-- dragging the leading handle reorders queued messages
+- clicking the Host edit icon uses the Host's own inline editor for text messages; this plugin only
+  appends back the attachment blocks the Host would drop. Attachment-only messages (where the Host
+  disables editing) fall back to the plugin editor
+- every queued message gets a small lock just before the native action cluster; it locks and unlocks
+  that one message only. The withdraw action sits at the row's trailing edge after the native actions
+- a locked message is struck through and cannot be edited; it stays queued but the Host skips it at
+  the turn boundary, so it is not auto-sent. It can still be withdrawn
+- unlocking puts it straight back into the sendable queue for the next turn boundary
+- locked ids are owned and persisted by the Host (`$DSH_HOME/queue-withdraw-frozen.json`), so they
+  survive an app restart
+- no drag handle icon: pressing anywhere on a row and moving reorders queued messages with the same
+  ghost and drop targets; buttons, the inline editor and images keep their own presses
 - removes the item through `Session.updateQueue(itemId, { kind: 'remove' })`
 - appends to an existing draft instead of overwriting it
 - restores the previous draft if the Host rejects the removal
@@ -63,6 +73,25 @@ Withdraw flow:
 4. call the public `session.updateQueue(itemId, { kind: 'remove' })`;
 5. on success the row disappears and the draft is already visible, so no persistent success notice
    is shown; on failure the old draft is restored and an error is reported.
+
+Lock flow:
+
+1. `POST /dsh-queue-withdraw/freeze` asks the Host to verify the id is still in `next-turn` and adds it
+   to the Host's locked set;
+2. the set is persisted to `$DSH_HOME/queue-withdraw-frozen.json` and reloaded on the next boot;
+3. the Host wraps the inbox `claim` entry (the turn-boundary drain) so it skips locked ids and takes
+   the next unlocked message; when everything is locked, that boundary claims no queued prompt;
+4. the message itself **never leaves `next-turn`**, so the queue row, drag handle, withdraw, and the
+   Host's delete/steer controls all keep working;
+5. the client marks the row (`dshqw-locked-row`: struck-through text), disables that row's edit button,
+   and shows the closed lock;
+6. a second click posts `POST /dsh-queue-withdraw/thaw`, which drops the id from the set so the message
+   is sendable again at the next turn boundary;
+7. withdrawing a locked message also drops its id from the set, so no stale lock remains.
+
+Known risk: enforcement is a Host-side prototype patch. In normal desktop use the Host installs it for
+existing agents at boot and persists the ids; only an extreme setup (a Host running with no Web client
+ever attaching, so the patch is never installed) could let a locked message be sent as usual.
 
 ## Install
 

@@ -15,7 +15,8 @@ window.__ModuleLoader__.load({
   id: 'dsh-queue-withdraw',
   factory(require) {
     const React = require('react')
-    const { useEffect, useMemo, useRef } = React
+    const { createPortal } = require('react-dom')
+    const { useEffect, useMemo, useRef, useState } = React
     const h = React.createElement
 
     /** Locale namespace owned by this plugin. */
@@ -46,6 +47,11 @@ window.__ModuleLoader__.load({
       'merge.attachments': '含附件的排队消息无法合并',
       'button.empty': '这条排队消息没有可撤回的文本',
       'button.failed': '撤回失败，消息仍在队列中',
+      'freeze.tooltip': '锁定，本轮结束不发送',
+      'freeze.failed': '锁定失败，队列可能已变化',
+      'frozen.thaw': '解锁',
+      'frozen.activate': '解锁',
+      'frozen.thawFailed': '解锁失败，队列可能已变化',
     }
 
     const en = {
@@ -73,16 +79,48 @@ window.__ModuleLoader__.load({
       'merge.attachments': 'Messages with attachments cannot be merged',
       'button.empty': 'This queued message has no text to withdraw',
       'button.failed': 'Withdraw failed; the message is still queued',
+      'freeze.tooltip': 'Lock: do not send it when the turn ends',
+      'freeze.failed': 'Lock failed; the queue may have changed',
+      'frozen.thaw': 'Unlock',
+      'frozen.activate': 'Unlock',
+      'frozen.thawFailed': 'Unlock failed; the queue may have changed',
     }
 
     /** Icon used by the injected row action. */
-  /** Drag handle icon. */
-  const WITHDRAW_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3v4h4"/><path d="M4.6 7A5 5 0 1 1 3.4 9.6"/></svg>'
+  /** Withdraw icon: down arrow onto the composer line. The viewBox is the
+   *  glyph's tight box so it fills the 14px action box like the Host icons. */
+  const WITHDRAW_ICON = '<svg viewBox="2.1 1.5 11.8 12.4" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2v7"/><path d="M5.2 6.6 8 9.4 10.8 6.6"/><path d="M2.8 13.2h10.4"/></svg>'
 
-  const HANDLE_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="6" cy="4" r="1"/><circle cx="10" cy="4" r="1"/><circle cx="6" cy="8" r="1"/><circle cx="10" cy="8" r="1"/><circle cx="6" cy="12" r="1"/><circle cx="10" cy="12" r="1"/></svg>'
+  /** Closed lock for the per-row lock action. Tight viewBox: fills 14px. */
+  const LOCK_ICON = '<svg viewBox="2.3 1.5 11.4 12.9" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.9" width="10" height="6.8" rx="1.6"/><path d="M5.3 6.9V4.9a2.7 2.7 0 0 1 5.4 0v2"/></svg>'
+  const UNLOCK_ICON = '<svg viewBox="2.3 1.5 11.4 12.9" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.9" width="10" height="6.8" rx="1.6"/><path d="M5.3 6.9V4.9a2.7 2.7 0 0 1 5.4 0"/></svg>'
 
   const REORDER_PATH = '/dsh-queue-withdraw/reorder'
 const UPDATE_PATH = '/dsh-queue-withdraw/update'
+const FREEZE_PATH = '/dsh-queue-withdraw/freeze'
+const THAW_PATH = '/dsh-queue-withdraw/thaw'
+const FROZEN_PATH = '/dsh-queue-withdraw/frozen'
+const DIAG_PATH = '/dsh-queue-withdraw/diag'
+
+    /**
+     * Held ids last reported by the Host, per conversation. The Host owns the
+     * authoritative set (it enforces the skip at claim time); this cache only
+     * drives the row styling and the freeze/unfreeze button state.
+     */
+    const frozenIdsBySession = new Map()
+
+    /**
+     * @param {string} sessionId - conversation id.
+     * @returns {Set<string>} held ids for that conversation.
+     */
+    function frozenIdsOf(sessionId) {
+      let ids = frozenIdsBySession.get(sessionId)
+      if (ids === undefined) {
+        ids = new Set()
+        frozenIdsBySession.set(sessionId, ids)
+      }
+      return ids
+    }
 
     /** Short-lived browser cache of files selected before a queue submission. */
     const CACHE_DB = 'dsh-queue-withdraw'
@@ -97,6 +135,8 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
   const trackedDraftAttachments = new Map()
   /** Per-session callback that snapshots the composer attachments. */
   const draftSavers = new Map()
+  /** Latest queue snapshot per conversation, for native-edit attachment keeping. */
+  const queueBySession = new Map()
     let cacheDbPromise
 
     /** @returns {Promise<IDBDatabase|null>} cache database, or null when unavailable. */
@@ -276,6 +316,40 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
       }
     }
 
+    /**
+     * Keep a message's attachments when the Host's own inline editor saves a
+     * text-only edit: the Host replaces the whole content, so the image/file
+     * blocks captured before the edit are appended back.
+     * @param {object|undefined} conversation - conversation service.
+     * @param {string} sessionId - owning conversation id.
+     */
+    function ensureNativeEditHook(conversation, sessionId) {
+      if (conversation === null || conversation === undefined) return
+      if (typeof conversation.updateQueue !== 'function') return
+      if (conversation.__dshQueueWithdrawUpdate === true) return
+      try {
+        const original = conversation.updateQueue.bind(conversation)
+        conversation.updateQueue = (itemId, action) => {
+          if (action !== null && typeof action === 'object' && action.kind === 'edit' && Array.isArray(action.content)) {
+            const current = (queueBySession.get(sessionId) ?? []).find((message) => String(message.id) === String(itemId))
+            const kept = attachmentBlocksOf(current?.content)
+            const hasAttachment = action.content.some((block) => block !== null && typeof block === 'object'
+              && (block.type === 'image' || block.type === 'file'))
+            if (kept.length > 0 && !hasAttachment) {
+              return original(itemId, {
+                ...action,
+                content: [...action.content, ...kept.map((block) => ({ type: block.type, attachment: block.ref }))],
+              })
+            }
+          }
+          return original(itemId, action)
+        }
+        conversation.__dshQueueWithdrawUpdate = true
+      } catch {
+        // A frozen service cannot be decorated; native edits then drop attachments.
+      }
+    }
+
     /** @param {unknown} content @returns {Array<{type: string, ref: object}>} attachment blocks. */
     function attachmentBlocksOf(content) {
       if (!Array.isArray(content)) return []
@@ -395,6 +469,21 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
     }
 
     /**
+     * Find the Host edit control inside one queue row.
+     * @param {Element} row - host queue row.
+     * @returns {Element|null} the edit button, when present.
+     */
+    function hostEditButtonOf(row) {
+      if (typeof row.querySelectorAll !== 'function') return null
+      for (const candidate of row.querySelectorAll('button[aria-label]')) {
+        if (candidate.hasAttribute?.('data-dsh-queue-withdraw') === true) continue
+        const label = candidate.getAttribute?.('aria-label') ?? ''
+        if (/编辑|Edit/i.test(label)) return candidate
+      }
+      return null
+    }
+
+    /**
      * Put one action at the row's leading edge, before the queue icon and text.
      * @param {Element} row - host queue row.
      * @param {Element} button - injected action.
@@ -423,10 +512,14 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
       const actionsRef = useRef(actions)
       const tRef = useRef(t)
       queueRef.current = queue
+      queueBySession.set(sessionId, queue)
       mutableRef.current = queueMutable
       actionsRef.current = actions
       tRef.current = t
       const previousFileRefsRef = useRef([])
+      /** Force one re-render after the Host reports a new frozen set. */
+      const [, setFrozenVersion] = useState(0)
+      const refreshFrozenRef = useRef(async () => {})
       useEffect(() => {
         const current = queuedFileRefs(queue)
         const removed = previousFileRefsRef.current.filter((old) => !current.some((ref) => ref.name === old.name && ref.size === old.size))
@@ -451,7 +544,7 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
         if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return undefined
         const editItems = new Map()
         const editEntries = new Set()
-        const handleItems = new WeakMap()
+        const rowItems = new WeakMap()
         let frame = null
         let disposed = false
         const cancelFrame = () => {
@@ -479,7 +572,36 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
             tRef.current('button.attachments'),
             tRef.current('button.cacheMissing'),
           )
-          if (accepted !== true) button.disabled = false
+          if (accepted !== true) {
+            button.disabled = false
+            return
+          }
+          // A withdrawn message leaves the queue, so its lock must go too.
+          const id = String(item.id)
+          if (frozenIdsOf(sessionId).has(id)) {
+            await actionsRef.current.thaw(id, tRef.current('frozen.thawFailed'))
+            await refreshFrozenRef.current()
+          }
+        }
+
+        /**
+         * Toggle one queue item's hold. The message stays queued either way; the
+         * Host only skips it at the turn boundary while it is held.
+         */
+        const freezeThrough = async (button, item) => {
+          if (button.disabled) return
+          button.disabled = true
+          const id = String(item.id)
+          const held = frozenIdsOf(sessionId).has(id)
+          const accepted = held
+            ? await actionsRef.current.thaw(id, tRef.current('frozen.thawFailed'))
+            : await actionsRef.current.freeze(id, tRef.current('freeze.failed'))
+          if (accepted !== true) {
+            button.disabled = false
+            return
+          }
+          await refreshFrozenRef.current()
+          button.disabled = false
         }
 
         /** Current inline edit popover, if any. */
@@ -632,54 +754,31 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
         /** Whether a pointer drag is currently moving a queue row. */
         let dragging = false
 
-        /** Give one row a drag handle and a full-row pointer drag ghost. */
-        const createHandle = (row, item) => {
-          if (typeof row.querySelector !== 'function' || typeof row.insertBefore !== 'function') return null
-          const handle = document.createElement('button')
-          handle.type = 'button'
-          handle.className = 'dshqw-handle'
-          handle.setAttribute('data-dshq-handle', '')
-          handle.setAttribute('aria-label', tRef.current('reorder.tooltip'))
-          handle.title = tRef.current('reorder.tooltip')
-          handle.innerHTML = HANDLE_ICON
-          handleItems.set(handle, item)
-          handle.addEventListener('dragstart', (event) => {
-            event.dataTransfer?.setData('application/x-dshq-item', String(item.id))
-            event.dataTransfer?.setData('text/plain', String(item.id))
-            if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.effectAllowed = 'move'
-          })
-          row.addEventListener('dragover', (event) => {
-            const types = event.dataTransfer?.types
-            if (types === null || types === undefined || !Array.from(types).includes('application/x-dshq-item')) return
-            event.preventDefault?.()
-            if (event.dataTransfer !== null && event.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
-          })
-          row.addEventListener('drop', async (event) => {
-            const source = event.dataTransfer?.getData?.('application/x-dshq-item')
-            if (source === null || source === undefined || source === '') return
-            const targetHandle = row.querySelector?.('[data-dshq-handle]')
-            const target = targetHandle === null || targetHandle === undefined ? undefined : handleItems.get(targetHandle)
-            if (target === undefined || source === String(target.id)) return
-            event.preventDefault?.()
-            event.stopPropagation?.()
-            const order = queueRef.current.map((entry) => String(entry.id))
-            const from = order.indexOf(source)
-            const to = order.indexOf(String(target.id))
-            if (from < 0 || to < 0) return
-            order.splice(from, 1)
-            order.splice(to, 0, source)
-            await actionsRef.current.reorder(order, tRef.current('reorder.failed'))
-          })
-          handle.addEventListener('pointerdown', (event) => {
-            if (event.button !== 0) return
-            const current = handleItems.get(handle)
-            if (current === undefined) return
-            const dock = row.closest?.('[data-queue-dock]') ?? row.parentElement
-            if (dock === null || dock === undefined) return
-            const initial = hostRowsOf(dock).map((entry) => {
-              const entryHandle = entry.querySelector?.('[data-dshq-handle]')
-              return entryHandle === null || entryHandle === undefined ? undefined : handleItems.get(entryHandle)?.id
-            }).filter((id) => id !== undefined).map(String)
+        /** @param {Element|null|undefined} target @returns {boolean} press lands on a control. */
+        const onRowControl = (target) => {
+          if (target === null || target === undefined || typeof target.closest !== 'function') return false
+          return target.closest('button, a, input, textarea, select, label, [contenteditable="true"], [role="button"]') !== null
+        }
+
+        /**
+         * Start a pointer drag from anywhere on one queue row. A three-pixel
+         * threshold separates a plain click from a reorder, so the row's own
+         * buttons, previews and text selection keep working.
+         * @param {Element} row - host queue row.
+         * @param {object} event - pointerdown event.
+         */
+        function beginRowDrag(row, event) {
+          if (event.button !== 0) return
+          if (onRowControl(event.target)) return
+          if (typeof row.getBoundingClientRect !== 'function') return
+          const current = rowItems.get(row)
+          if (current === undefined) return
+          const dock = row.closest?.('[data-queue-dock]') ?? row.parentElement
+          if (dock === null || dock === undefined) return
+          const initial = hostRowsOf(dock)
+            .map((entry) => rowItems.get(entry)?.id)
+            .filter((id) => id !== undefined)
+            .map(String)
             const startX = event.clientX
             const startY = event.clientY
             const rowRect = row.getBoundingClientRect()
@@ -755,7 +854,7 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
               if (mergeTarget !== null) mergeTarget.classList.remove('dshqw-merge-target')
               mergeTarget = null
               const before = pointerEvent.clientY < rect.top + rect.height / 2
-              target.parentNode?.insertBefore(row, before ? target : target.nextSibling)
+              target.parentElement?.insertBefore(row, before ? target : target.nextSibling)
             }
             const finish = async () => {
               document.removeEventListener?.('pointermove', move, true)
@@ -769,8 +868,7 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
               clearDropHint()
               if (!started) return
               if (mergeWith !== null) {
-                const targetHandle = mergeWith.querySelector?.('[data-dshq-handle]')
-                const targetItem = targetHandle === null || targetHandle === undefined ? undefined : handleItems.get(targetHandle)
+                const targetItem = rowItems.get(mergeWith)
                 if (targetItem !== undefined && String(targetItem.id) !== String(current.id)) {
                   await actionsRef.current.mergeInto(String(targetItem.id), String(current.id), tRef.current('merge.failed'))
                 }
@@ -786,11 +884,10 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
                 )
                 return
               }
-              const order = hostRowsOf(dock).map((entry) => {
-                const entryHandle = entry.querySelector?.('[data-dshq-handle]')
-                const targetItem = entryHandle === null || entryHandle === undefined ? undefined : handleItems.get(entryHandle)
-                return targetItem === undefined ? undefined : String(targetItem.id)
-              }).filter((id) => id !== undefined)
+              const order = hostRowsOf(dock)
+                .map((entry) => rowItems.get(entry)?.id)
+                .filter((id) => id !== undefined)
+                .map(String)
               if (order.length !== initial.length || order.some((id, index) => id !== initial[index])) {
                 await actionsRef.current.reorder(order, tRef.current('reorder.failed'))
               }
@@ -798,8 +895,25 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
             document.addEventListener?.('pointermove', move, true)
             document.addEventListener?.('pointerup', finish, true)
             document.addEventListener?.('pointercancel', finish, true)
-          })
-          row.insertBefore(handle, row.firstChild ?? null)
+        }
+
+        /**
+         * Give one queue row its drag affordance and the withdraw/lock actions.
+         * Idempotent: the row keeps one listener and one pair of buttons.
+         * @param {Element} row - host queue row.
+         * @param {object} item - queue item currently shown by the row.
+         * @returns {Element|null} the injected withdraw button.
+         */
+        const ensureRow = (row, item) => {
+          if (typeof row.querySelector !== 'function') return null
+          rowItems.set(row, item)
+          const preview = row.querySelector?.('[class*="preview"]') ?? null
+          const textLeftBefore = preview?.getBoundingClientRect?.().left
+          const actions = row.querySelector?.('[class*="actions"]') ?? null
+          if (row.getAttribute?.('data-dshq-row') !== '') {
+            row.setAttribute('data-dshq-row', '')
+            row.addEventListener('pointerdown', (event) => beginRowDrag(row, event))
+          }
           let withdraw = row.querySelector?.('[data-dshq-withdraw]')
           if (withdraw === null || withdraw === undefined) {
             withdraw = document.createElement('button')
@@ -811,26 +925,57 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
             withdraw.addEventListener('click', (event) => {
               event.preventDefault?.()
               event.stopPropagation?.()
-              const current = row.querySelector?.('[data-dshq-handle]')
-              const target = current === null || current === undefined ? undefined : handleItems.get(current)
+              const target = rowItems.get(row)
               if (target !== undefined) void withdrawThrough(withdraw, target)
             })
-            handle.after?.(withdraw)
+            // Appended once, at the dock's trailing edge, after the native
+            // actions: the left text edge never moves when React re-creates the
+            // row and this button is re-added.
+            row.append?.(withdraw)
+            noteDecoration(row, item, 'withdraw')
           }
-          return handle
+          let freeze = row.querySelector?.('[data-dshq-freeze]')
+          if (freeze === null || freeze === undefined) {
+            freeze = document.createElement('button')
+            freeze.type = 'button'
+            freeze.className = 'dshqw-freeze'
+            freeze.setAttribute('data-dshq-freeze', '')
+            freeze.setAttribute('aria-label', tRef.current('freeze.tooltip'))
+            freeze.setAttribute('title', tRef.current('freeze.tooltip'))
+            freeze.innerHTML = UNLOCK_ICON
+            freeze.addEventListener('click', (event) => {
+              event.preventDefault?.()
+              event.stopPropagation?.()
+              const target = rowItems.get(row)
+              if (target !== undefined) void freezeThrough(freeze, target)
+            })
+            // The lock sits just before the native action cluster.
+            if (actions !== null && actions !== undefined) row.insertBefore(freeze, actions)
+            else row.append?.(freeze)
+            noteDecoration(row, item, 'freeze')
+          }
+          const textLeftAfter = preview?.getBoundingClientRect?.().left
+          if (textLeftBefore !== undefined && textLeftAfter !== undefined
+            && Math.abs(textLeftAfter - textLeftBefore) > 0.5) {
+            reportLayout('text-shift', {
+              itemId: String(item?.id ?? '?'),
+              before: Math.round(textLeftBefore),
+              after: Math.round(textLeftAfter),
+            })
+          }
+          return withdraw
         }
 
         /**
-         * Make the Host edit control the single queue action. Every edit is a
-         * withdraw: text plus attachments are moved back into the composer, so
-         * the Host's text-only inline editor never drops attachment blocks.
-         * Attachment rows need their disabled edit control re-enabled; plain
-         * text rows keep their native enabled state.
+         * Leave text messages to the Host's own inline editor. Only a message
+         * made purely of attachments — which the Host refuses to edit — falls
+         * back to this plugin's editor.
          */
         const syncHostEdit = (row, item) => {
           if (typeof row.querySelectorAll !== 'function') return
           const plan = withdrawPlan(item?.content)
-          if (plan.unsupported || (plan.text === '' && plan.attachments.length === 0)) return
+          if (plan.unsupported || plan.text !== '') return
+          if (plan.attachments.length === 0) return
           let edit = null
           for (const candidate of row.querySelectorAll('button[aria-label]')) {
             if (candidate.hasAttribute?.('data-dsh-queue-withdraw') === true) continue
@@ -840,8 +985,7 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
           if (edit === null) return
           editItems.set(edit, item)
           editEntries.add(edit)
-          if (plan.attachments.length > 0) edit.disabled = false
-          edit.removeAttribute?.('title')
+          edit.disabled = false
           edit.setAttribute('aria-label', tRef.current('button.editHint'))
           if (edit.hasAttribute?.('data-dshq-edit') !== true) {
             edit.setAttribute('data-dshq-edit', '')
@@ -872,34 +1016,267 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
           }
         }
 
+        /**
+         * Reflect the Host's held set on one live queue row: struck-through
+         * text, a closed lock at the dock's trailing edge, and a disabled edit
+         * control. Withdraw and the rest of the row stay available; the message
+         * itself never leaves `next-turn`, only the claim skips it.
+         */
+        const decorateFrozenRow = (row, item) => {
+          const frozen = frozenIdsOf(sessionId).has(String(item.id))
+          if (row.classList?.contains?.('dshqw-locked-row') !== frozen) {
+            row.classList?.toggle?.('dshqw-locked-row', frozen)
+          }
+          const button = row.querySelector?.('[data-dshq-freeze]')
+          if (button !== null && button !== undefined) {
+            if (button.classList?.contains?.('dshqw-freeze-on') !== frozen) {
+              button.classList?.toggle?.('dshqw-freeze-on', frozen)
+            }
+            const icon = frozen ? LOCK_ICON : UNLOCK_ICON
+            if (button.getAttribute?.('data-locked') !== String(frozen)) {
+              button.setAttribute?.('data-locked', String(frozen))
+              button.innerHTML = icon
+            }
+            const label = frozen ? tRef.current('frozen.activate') : tRef.current('freeze.tooltip')
+            if (button.title !== label) button.title = label
+            if (button.getAttribute?.('aria-label') !== label) button.setAttribute?.('aria-label', label)
+            const pressed = frozen ? 'true' : 'false'
+            if (button.getAttribute?.('aria-pressed') !== pressed) button.setAttribute?.('aria-pressed', pressed)
+          }
+          const edit = hostEditButtonOf(row)
+          if (edit !== null) {
+            if (frozen) {
+              edit.disabled = true
+              edit.setAttribute?.('data-dshq-locked', '')
+            } else if (edit.hasAttribute?.('data-dshq-locked') === true) {
+              edit.disabled = false
+              edit.removeAttribute?.('data-dshq-locked')
+            }
+          }
+        }
+
         const sync = () => {
           if (disposed || dragging) return
           const queueNow = mutableRef.current === true ? queueRef.current : []
           const docks = docksOf(sessionId)
           for (const dock of docks) {
+            const rect = dock.getBoundingClientRect?.()
+            const echoes = typeof dock.querySelectorAll === 'function'
+              ? dock.querySelectorAll('[data-submission-echo]').length
+              : 0
+            const list = dock.querySelector?.('ul') ?? null
+            const header = dock.querySelector?.('button[class*="header"]') ?? null
+            const previous = dockRects.get(dock)
+            if (rect !== undefined && previous !== undefined) {
+              const dh = Math.round(rect.height - previous.height)
+              const dt = Math.round(rect.top - previous.top)
+              const listHidden = list === null ? null : list.hidden === true || list.getAttribute?.('hidden') !== null
+              if (Math.abs(dh) > 0.5 || Math.abs(dt) > 0.5 || previous.echoes !== echoes
+                || previous.listHidden !== listHidden || previous.hasHeader !== (header !== null)) {
+                reportLayout('dock-geometry', {
+                  from: previous,
+                  to: {
+                    top: Math.round(rect.top),
+                    height: Math.round(rect.height),
+                    rows: hostRowsOf(dock).length,
+                    echoes,
+                    hasHeader: header !== null,
+                    listHidden,
+                  },
+                  dh,
+                  dt,
+                })
+              }
+            }
+            if (rect !== undefined) {
+              const listHidden = list === null ? null : list.hidden === true || list.getAttribute?.('hidden') !== null
+              dockRects.set(dock, {
+                top: Math.round(rect.top),
+                height: Math.round(rect.height),
+                echoes,
+                hasHeader: header !== null,
+                listHidden,
+              })
+            }
             const rows = hostRowsOf(dock)
             for (let index = 0; index < rows.length; index += 1) {
               const item = queueNow[index]
               if (item === undefined) continue
               const row = rows[index]
-              let handle = row.querySelector?.('[data-dshq-handle]')
-              if (handle === null || handle === undefined) handle = createHandle(row, item)
-              else handleItems.set(handle, item)
+              const itemId = String(item.id)
+              const previousNode = rowOfItem.get(itemId)
+              if (previousNode !== undefined && previousNode !== row) {
+                reportLayout('row-replaced', {
+                  itemId,
+                  connected: previousNode.isConnected === true,
+                  rows: rows.length,
+                  hadMarker: previousNode.getAttribute?.('data-dshq-row') === '',
+                })
+              }
+              rowOfItem.set(itemId, row)
+              if (row.getAttribute?.('data-dshq-row') === '' && row.querySelector?.('[data-dshq-withdraw]') === null) {
+                reportLayout('buttons-dropped', { itemId, index, rows: rows.length })
+              }
+              ensureRow(row, item)
               syncHostEdit(row, item)
               syncPreviews(row)
+              decorateFrozenRow(row, item)
             }
+          }
+          scheduleProbe()
+        }
+
+        /** @returns {string} a short tag.class description of one element. */
+        const describeNode = (node) => {
+          const tag = node?.tagName?.toLowerCase?.() ?? '?'
+          const classes = String(node?.className ?? '').split(/\s+/).filter(Boolean).join('.')
+          return classes === '' ? tag : tag + '.' + classes
+        }
+
+        /** Per-dock geometry seen at the previous sync. */
+        const dockRects = new WeakMap()
+        /** The DOM row currently bound to each queue item. */
+        const rowOfItem = new Map()
+        /** When each queue item was last decorated, to spot React re-creating rows. */
+        const decoratedAt = new Map()
+
+        /**
+         * Temporary diagnostics for the submit/edit jitter: decoration churn and
+         * dock geometry changes land in the same JSONL sink as the gap probe.
+         * @param {string} phase @param {object} payload
+         */
+        const reportLayout = (phase, payload) => {
+          try {
+            if (typeof fetch !== 'function') return
+            void fetch(DIAG_PATH, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ source: 'dsh-queue-withdraw', phase, sessionId, at: Date.now(), ...payload }),
+            }).catch(() => {})
+          } catch {
+            // Diagnostics never disturb the UI.
           }
         }
 
-        const observer = new MutationObserver(schedule)
+        /** Record one action button being created for a row. */
+        const noteDecoration = (row, item, which) => {
+          const itemId = String(item?.id ?? '?')
+          const key = itemId + ':' + which
+          const now = Date.now()
+          const previous = decoratedAt.get(key)
+          decoratedAt.set(key, now)
+          const dock = row.closest?.('[data-queue-dock]') ?? null
+          const rect = row.getBoundingClientRect?.()
+          reportLayout('decorate', {
+            itemId,
+            which,
+            recreated: previous !== undefined && now - previous < 15000,
+            rows: dock === null ? -1 : hostRowsOf(dock).length,
+            row: rect === undefined ? null : { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width) },
+          })
+        }
+
+        /**
+         * Record the geometry whenever visible space appears between the dock
+         * and the composer. The Host tucks the dock under the composer with a
+         * negative bottom margin; a leftover gap means that contract broke, and
+         * these numbers identify which box inserted the space.
+         */
+        let lastGapProbe = 0
+        let probeQueued = false
+        /** Measure after the frame is painted, never inside a commit. */
+        const scheduleProbe = () => {
+          if (probeQueued) return
+          probeQueued = true
+          const run = () => {
+            probeQueued = false
+            probeDockGap()
+          }
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+          else if (typeof setTimeout === 'function') setTimeout(run, 16)
+        }
+        const probeDockGap = () => {
+          const now = Date.now()
+          if (now - lastGapProbe < 1000) return
+          lastGapProbe = now
+          try {
+            for (const dock of docksOf(sessionId)) {
+              const rect = dock.getBoundingClientRect?.()
+              if (rect === undefined || rect.height <= 0) continue
+              const holder = dock.parentElement ?? null
+              const next = holder?.nextElementSibling ?? null
+              if (next === null) continue
+              const nextRect = next.getBoundingClientRect?.()
+              if (nextRect === undefined) continue
+              const gap = Math.round(nextRect.top - rect.bottom)
+              if (gap <= 2) continue
+              void fetch(DIAG_PATH, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  sessionId,
+                  gap,
+                  viewport: { width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio },
+                  dock: { node: describeNode(dock), top: Math.round(rect.top), bottom: Math.round(rect.bottom), height: Math.round(rect.height), marginBottom: getComputedStyle(dock).marginBottom },
+                  holder: { node: describeNode(holder), gap: getComputedStyle(holder).gap, paddingBottom: getComputedStyle(holder).paddingBottom },
+                  next: { node: describeNode(next), top: Math.round(nextRect.top) },
+                }),
+              }).catch(() => {})
+            }
+          } catch {
+            // Diagnostics must never disturb the conversation.
+          }
+        }
+
+        refreshFrozenRef.current = async () => {
+          const ids = await actionsRef.current.readFrozen?.(tRef.current('freeze.failed'))
+          if (Array.isArray(ids)) {
+            const set = frozenIdsOf(sessionId)
+            set.clear()
+            for (const id of ids) set.add(String(id))
+          }
+          sync()
+        }
+
+        /** Whether a DOM node is, contains, or sits inside a queue dock. */
+        const touchedDock = (node) => {
+          if (node === null || node === undefined || node.nodeType !== 1) return false
+          if (node.matches?.('[data-queue-dock]') === true) return true
+          if (node.closest?.('[data-queue-dock]') !== null && node.closest?.('[data-queue-dock]') !== undefined) return true
+          const inner = node.querySelector?.('[data-queue-dock]')
+          return inner !== null && inner !== undefined
+        }
+
+        // Only dock traffic re-syncs. The sync runs in the observer callback
+        // (a microtask right after React commits) rather than in a later
+        // animation frame, so freshly rendered rows get their actions before
+        // the browser paints and the dock does not flash or shift.
+        const observer = new MutationObserver((mutations) => {
+          if (disposed) return
+          for (const mutation of mutations) {
+            if (mutation.type === 'attributes') {
+              if (touchedDock(mutation.target)) { sync(); return }
+              continue
+            }
+            if (mutation.target === document.body || touchedDock(mutation.target)) { sync(); return }
+            for (const node of mutation.addedNodes ?? []) {
+              if (touchedDock(node)) { sync(); return }
+            }
+            for (const node of mutation.removedNodes ?? []) {
+              if (touchedDock(node)) { sync(); return }
+            }
+          }
+        })
         observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'hidden'] })
         sync()
+        void refreshFrozenRef.current()
         return () => {
           disposed = true
           observer.disconnect()
           cancelFrame()
-          for (const handle of document.querySelectorAll?.('[data-dshq-handle]') ?? []) handle.remove?.()
+          for (const row of document.querySelectorAll?.('[data-dshq-row]') ?? []) row.removeAttribute?.('data-dshq-row')
           for (const withdraw of document.querySelectorAll?.('[data-dshq-withdraw]') ?? []) withdraw.remove?.()
+          for (const freeze of document.querySelectorAll?.('[data-dshq-freeze]') ?? []) freeze.remove?.()
           closeEditor()
           for (const edit of [...editEntries]) {
             if (edit.hasAttribute?.('data-dshq-edit') === true) edit.disabled = true
@@ -910,37 +1287,64 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
         }
       }, [sessionId, queueMutable])
 
+      // Held messages stay inside the Host queue, so the Host dock renders them
+      // itself and no custom row or fallback surface is needed here.
       return null
     }
 
     /** Presentation only; colors and elevation come from the Host theme. */
     const CSS = `
-.dshqw-handle {
+/* The injected row actions are exact clones of the Host's action button:
+   28x28 circle, tertiary 14px icon, the same hover pill, focus ring and
+   disabled treatment. */
+.dshqw-withdraw,
+.dshqw-freeze {
   box-sizing: border-box;
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
-  border-radius: var(--dsw-radius-sm);
+  border-radius: 999px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+.dshqw-withdraw > svg,
+.dshqw-freeze > svg {
+  width: 14px;
+  height: 14px;
+}
+/* No drag handle: the row itself is the drag source, with a grab cursor as the
+   affordance. */
+[data-queue-dock] [data-dshq-row] {
   cursor: grab;
-  opacity: .45;
+  user-select: none;
 }
-.dshqw-handle:hover {
-  color: var(--dsw-alias-label-primary);
-  opacity: 1;
+[data-queue-dock] [data-dshq-row] textarea,
+[data-queue-dock] [data-dshq-row] input {
+  cursor: text;
+  user-select: text;
 }
-.dshqw-handle:active {
+[data-queue-dock] [data-dshq-row].dshqw-drag-source {
   cursor: grabbing;
 }
-.dshqw-handle:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 1px;
+.dshqw-withdraw:hover:not(:disabled),
+.dshqw-freeze:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dshqw-withdraw:disabled,
+.dshqw-freeze:disabled {
+  cursor: default;
+  opacity: .45;
+}
+.dshqw-withdraw:focus-visible,
+.dshqw-freeze:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
 }
 .dshqw-drag-source {
   opacity: .28;
@@ -956,26 +1360,6 @@ const UPDATE_PATH = '/dsh-queue-withdraw/update'
   background: var(--dsw-alias-bg-base);
   box-shadow: var(--dsw-elevation-soft);
   overflow: hidden;
-}
-.dshqw-withdraw {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
-  opacity: .55;
-}
-.dshqw-withdraw:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); opacity: 1; }
-button[data-dshq-edit]:hover { background: transparent !important; }
-[data-queue-dock] button:not([data-dshq-handle]):not([data-dshq-withdraw]):not([data-dshq-edit]):hover {
-  background: transparent !important;
 }
 .dshqw-editorBackdrop { position: fixed; inset: 0; z-index: 160; display: grid; place-items: center; background: rgba(0,0,0,.18); }
 .dshqw-editor { width: min(420px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 48px)); overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-elevation-soft); color: var(--dsw-alias-label-primary); }
@@ -995,6 +1379,25 @@ button[data-dshq-edit]:hover { background: transparent !important; }
 .dshqw-drop-composer { outline: 2px dashed var(--dsw-alias-state-business-primary) !important; outline-offset: 2px; }
 .dshqw-previewBackdrop { position: fixed; inset: 0; z-index: 170; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.55); cursor: zoom-out; }
 .dshqw-previewImage { max-width: min(92vw, 1200px); max-height: 88vh; object-fit: contain; border-radius: 8px; box-shadow: var(--dsw-elevation-soft); }
+.dshqw-freeze-on {
+  opacity: 1;
+  color: var(--dsw-alias-label-primary);
+}
+.dshqw-freeze-on > svg {
+  color: var(--dsw-alias-state-business-primary);
+}
+[data-queue-dock] .dshqw-locked-row [class*="preview"] {
+  text-decoration: line-through;
+  opacity: .55;
+}
+/* A single queued row carries the Host's own queue icon; it is redundant next
+   to the injected actions, so the decorated row hides it. */
+[data-queue-dock] li [class*="lead"] {
+  display: none;
+}
+[data-queue-dock] .dshqw-locked-row [class*="attachments"] {
+  opacity: .55;
+}
 `
 
     /**
@@ -1038,6 +1441,7 @@ button[data-dshq-edit]:hover { background: transparent !important; }
             conversation = scope?.get('conversation')
             shell = conversation?.input?.for?.(scope)
             ensureDraftCacheHook(conversation)
+            ensureNativeEditHook(conversation, sessionId)
           } catch {
             conversation = undefined
             shell = undefined
@@ -1333,6 +1737,75 @@ button[data-dshq-edit]:hover { background: transparent !important; }
                   rollback()
                   notify('error', failure)
                   return false
+                }
+              },
+              /**
+               * Ask the Host to skip one queued message at the turn boundary.
+               * @param {string} itemId - queue item id.
+               * @param {string} failure - failure notice.
+               * @returns {Promise<boolean>} whether the message is held.
+               */
+              freeze: async (itemId, failure) => {
+                try {
+                  const response = await fetch(FREEZE_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId, itemId }),
+                  })
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true) {
+                    notify('error', failure)
+                    return false
+                  }
+                  return true
+                } catch {
+                  notify('error', failure)
+                  return false
+                }
+              },
+              /**
+               * Release one held message so the next turn boundary sends it.
+               * @param {string} itemId - queue item id.
+               * @param {string} failure - failure notice.
+               * @returns {Promise<boolean>} whether the message is released.
+               */
+              thaw: async (itemId, failure) => {
+                try {
+                  const response = await fetch(THAW_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId, itemId }),
+                  })
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true) {
+                    notify('error', failure)
+                    return false
+                  }
+                  return true
+                } catch {
+                  notify('error', failure)
+                  return false
+                }
+              },
+              /**
+               * Read the Host's held ids for this conversation.
+               * @param {string} failure - failure notice.
+               * @returns {Promise<string[]|null>} held ids, or null on failure.
+               */
+              readFrozen: async (failure) => {
+                try {
+                  const response = await fetch(FROZEN_PATH, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ sessionId }),
+                  })
+                  const body = await response.json?.()
+                  if (response.ok !== true || body?.ok !== true || !Array.isArray(body?.ids)) {
+                    return null
+                  }
+                  return body.ids.map(String)
+                } catch {
+                  return null
                 }
               },
             },

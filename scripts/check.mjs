@@ -8,10 +8,14 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
 import { apply as applyHostPlugin } from '../index.js'
+
+// Keep the Host-side frozen-id file inside a scratch directory.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-queue-withdraw-check-'))
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), 'utf8')
@@ -44,7 +48,7 @@ function equal(actual, expected, message) {
 
 await check('manifest declares a DSH bundle and web client half', () => {
   assert.equal(manifest.name, 'dsh-queue-withdraw')
-  assert.equal(manifest.version, '1.7.1')
+  assert.equal(manifest.version, '1.11.5')
   assert.equal(manifest.license, 'MIT')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports['./client'], './client.js')
@@ -71,8 +75,8 @@ await check('bundle patch inserts exactly one queue-withdraw row', () => {
   assert.equal((patch.match(/- insert:/g) ?? []).length, 1, 'one insert')
 })
 
-await check('client only requires the frozen React module', () => {
-  const allowed = new Set(['react'])
+await check('client only requires the frozen React modules', () => {
+  const allowed = new Set(['react', 'react-dom'])
   const requires = [...clientSource.matchAll(/require\('([^']+)'\)/g)].map((match) => match[1])
   for (const id of requires) assert(allowed.has(id), 'unexpected require ' + id)
   assert(requires.includes('react'), 'react required')
@@ -85,7 +89,7 @@ await check('stylesheet uses theme tokens and no literal colors', () => {
   const css = clientSource.slice(start, end)
   assert.deepEqual([...css.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((match) => match[0]), [], 'literal colors')
   assert(css.includes('var(--dsw-'), 'theme tokens present')
-  assert(css.includes('.dshqw-handle'), 'drag handle styles')
+  assert(css.includes('[data-dshq-row]'), 'row drag affordance styles')
 })
 
 await check('locale files carry title and description', () => {
@@ -135,6 +139,14 @@ function createFakeReact() {
       cursor += 1
       if (!(index in hooks)) hooks[index] = factory()
       return hooks[index]
+    },
+    useState(initial) {
+      const index = cursor
+      cursor += 1
+      if (!(index in hooks)) hooks[index] = typeof initial === 'function' ? initial() : initial
+      return [hooks[index], (next) => {
+        hooks[index] = typeof next === 'function' ? next(hooks[index]) : next
+      }]
     },
     useRef(initial) {
       const index = cursor
@@ -186,6 +198,27 @@ class FakeNode {
     this.textContent = ''
     this.isConnected = true
     this.listeners = new Map()
+    this.style = {}
+    this._rect = { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 }
+  }
+
+  getBoundingClientRect() {
+    const { left, top, width, height } = this._rect
+    return { left, top, width, height, right: left + width, bottom: top + height }
+  }
+
+  cloneNode() {
+    const copy = new FakeNode(this.tagName.toLowerCase())
+    copy.className = this.className
+    copy._rect = { ...this._rect }
+    for (const child of this.children) copy.append(child.cloneNode())
+    return copy
+  }
+
+  get nextSibling() {
+    if (this.parentElement === null) return null
+    const index = this.parentElement.children.indexOf(this)
+    return this.parentElement.children[index + 1] ?? null
   }
 
   append(child) {
@@ -198,7 +231,38 @@ class FakeNode {
 
   get firstChild() { return this.children[0] ?? null }
 
+  get firstElementChild() { return this.children[0] ?? null }
+
+  get lastElementChild() { return this.children[this.children.length - 1] ?? null }
+
+  get classList() {
+    const node = this
+    return {
+      contains(name) { return node.className.split(/\s+/).filter(Boolean).includes(name) },
+      add(name) {
+        const set = new Set(node.className.split(/\s+/).filter(Boolean))
+        set.add(name)
+        node.className = [...set].join(' ')
+      },
+      remove(name) {
+        const set = new Set(node.className.split(/\s+/).filter(Boolean))
+        set.delete(name)
+        node.className = [...set].join(' ')
+      },
+      toggle(name, force) {
+        const set = new Set(node.className.split(/\s+/).filter(Boolean))
+        const add = force === undefined ? !set.has(name) : force
+        if (add) set.add(name)
+        else set.delete(name)
+        node.className = [...set].join(' ')
+      },
+    }
+  }
+
   insertBefore(child, anchor) {
+    if (child.parentElement !== null) {
+      child.parentElement.children = child.parentElement.children.filter((node) => node !== child)
+    }
     child.parentElement = this
     const index = anchor === null ? this.children.length : this.children.indexOf(anchor)
     if (index < 0) this.children.push(child)
@@ -244,12 +308,31 @@ class FakeNode {
   }
 
   closest(selector) {
-    if (selector !== '[data-conversation-session]') return null
-    if (this.getAttribute('data-conversation-session') !== null) return this
-    let node = this.parentElement
-    while (node !== null) {
-      if (node.getAttribute?.(selector) !== null) return node
-      node = node.parentElement
+    if (selector === '[data-conversation-session]' || selector === '[data-queue-dock]') {
+      let node = this
+      while (node !== null) {
+        if (node.getAttribute?.(selector) !== null) return node
+        node = node.parentElement
+      }
+      return null
+    }
+    if (selector === 'li') {
+      let node = this
+      while (node !== null) {
+        if (node.tagName === 'LI') return node
+        node = node.parentElement
+      }
+      return null
+    }
+    if (selector === 'button, a, input, textarea, select, label, [contenteditable="true"], [role="button"]') {
+      let node = this
+      while (node !== null) {
+        if (node.tagName === 'BUTTON' || node.tagName === 'A' || node.tagName === 'INPUT'
+          || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT' || node.tagName === 'LABEL'
+          || node.getAttribute?.('contenteditable') === 'true' || node.getAttribute?.('role') === 'button') return node
+        node = node.parentElement
+      }
+      return null
     }
     return null
   }
@@ -276,6 +359,22 @@ class FakeNode {
     if (selector === '[data-dshq-handle]') {
       return descendants.find((node) => node.getAttribute('data-dshq-handle') !== null) ?? null
     }
+    if (selector === '[data-dshq-withdraw]') {
+      return descendants.find((node) => node.getAttribute('data-dshq-withdraw') !== null) ?? null
+    }
+    if (selector === '[data-dshq-freeze]') {
+      return descendants.find((node) => node.getAttribute('data-dshq-freeze') !== null) ?? null
+    }
+    if (selector === 'ul, ol') {
+      return descendants.find((node) => node.tagName === 'UL' || node.tagName === 'OL') ?? null
+    }
+    if (selector === 'li') return descendants.find((node) => node.tagName === 'LI') ?? null
+    if (selector === '[class*="preview"]') {
+      return descendants.find((node) => typeof node.className === 'string' && node.className.includes('preview')) ?? null
+    }
+    if (selector === '[class*="actions"]') {
+      return descendants.find((node) => typeof node.className === 'string' && node.className.includes('actions')) ?? null
+    }
     return null
   }
 }
@@ -287,14 +386,26 @@ function createFakeDocument(queueText, rowCount = 1) {
   owner.setAttribute('data-conversation-session', 'session-a')
   body.append(owner)
   const dock = new FakeNode('div')
+  dock.className = 'v1kfCW_dock'
   dock.setAttribute('data-queue-dock', '')
   owner.append(dock)
+  const panel = new FakeNode('div')
+  panel.className = 'v1kfCW_panel'
+  dock.append(panel)
+  const list = new FakeNode('ul')
+  list.className = 'v1kfCW_list'
+  panel.append(list)
   const rows = []
   const actionBoxes = []
   for (let index = 0; index < rowCount; index += 1) {
     const row = new FakeNode('li')
-    dock.append(row)
+    row.className = 'v1kfCW_row'
+    list.append(row)
+    const preview = new FakeNode('span')
+    preview.className = 'v1kfCW_preview'
+    row.append(preview)
     const actionBox = new FakeNode('div')
+    actionBox.className = 'v1kfCW_actions'
     row.append(actionBox)
     const hostEdit = new FakeNode('button')
     hostEdit.setAttribute('aria-label', '编辑')
@@ -306,14 +417,33 @@ function createFakeDocument(queueText, rowCount = 1) {
     body,
     head: { appendChild() {} },
     _dock: dock,
+    _panel: panel,
+    _list: list,
     _row: rows[0],
     _rows: rows,
     _actions: actionBoxes[0],
     _actionBoxes: actionBoxes,
+    _hit: null,
+    _listeners: new Map(),
     createElement: (tag) => new FakeNode(tag),
-    querySelectorAll: (selector) => selector === '[data-queue-dock]' ? [dock]
-      : selector === '[data-dshq-handle]' ? rows.flatMap((row) => row.descendants()).filter((node) => node.getAttribute('data-dshq-handle') !== null)
-        : [],
+    elementFromPoint: () => document._hit,
+    addEventListener(type, callback) {
+      if (!document._listeners.has(type)) document._listeners.set(type, [])
+      document._listeners.get(type).push(callback)
+    },
+    removeEventListener(type, callback) {
+      document._listeners.set(type, (document._listeners.get(type) ?? []).filter((entry) => entry !== callback))
+    },
+    async dispatch(type, event = {}) {
+      event.preventDefault ??= () => {}
+      event.stopPropagation ??= () => {}
+      for (const callback of document._listeners.get(type) ?? []) await callback(event)
+    },
+    querySelectorAll: (selector) => selector === '[data-queue-dock]' ? (dock.isConnected ? [dock] : [])
+      : selector === '[data-dshq-row]' ? rows.filter((row) => row.getAttribute('data-dshq-row') !== null)
+        : selector === '[data-dshq-withdraw]' ? rows.flatMap((row) => row.descendants()).filter((node) => node.getAttribute('data-dshq-withdraw') !== null)
+          : selector === '[data-dshq-freeze]' ? rows.flatMap((row) => row.descendants()).filter((node) => node.getAttribute('data-dshq-freeze') !== null)
+            : [],
   }
   void queueText
   return document
@@ -322,8 +452,15 @@ function createFakeDocument(queueText, rowCount = 1) {
 /** Load the client module against a fake runtime/document. */
 function loadClient({ react, document, sessions, locale, fetch }) {
   let loaded
+  const storage = new Map()
   const sandbox = {
-    window: { __ModuleLoader__: { load(definition) { loaded = definition } } },
+    window: {
+      __ModuleLoader__: { load(definition) { loaded = definition } },
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => { storage.set(key, value) },
+      },
+    },
     document,
     File: class FakeFile {
       constructor(parts, name, options) {
@@ -344,10 +481,14 @@ function loadClient({ react, document, sessions, locale, fetch }) {
   }
   if (fetch !== undefined) sandbox.fetch = fetch
   vm.runInNewContext(clientSource, sandbox, { filename: 'client.js' })
-  return loaded.factory((id) => {
-    if (id === 'react') return react
-    throw new Error('unexpected require ' + id)
-  })
+  return {
+    plugin: loaded.factory((id) => {
+      if (id === 'react') return react
+      if (id === 'react-dom') return { createPortal: (node) => node }
+      throw new Error('unexpected require ' + id)
+    }),
+    storage,
+  }
 }
 
 /** Translator for one locale dictionary. */
@@ -397,11 +538,16 @@ function scenario(options = {}) {
       get attachmentIds() { return attachmentIds },
     },
   }
+  const updateQueueCalls = []
   const conversation = {
     input: { for: () => notification },
     createDrafts: (sessionId, files) => {
       draftCalls.push({ sessionId, files })
       return files.map((file, index) => ({ kind: 'image', id: 'draft-' + (index + 1), file, previewUrl: 'blob:draft' }))
+    },
+    updateQueue: async (itemId, action) => {
+      updateQueueCalls.push({ itemId, action })
+      return { ok: true }
     },
     releaseDraftAttachment: (id) => { releasedDrafts.push(id) },
   }
@@ -414,7 +560,9 @@ function scenario(options = {}) {
   const localeRegistrations = []
   const registrations = []
   const reactRuntime = createFakeReact()
-  const plugin = loadClient({ react: reactRuntime.react, document, sessions, fetch: options.fetch })
+  const loaded = loadClient({ react: reactRuntime.react, document, sessions, fetch: options.fetch })
+  const plugin = loaded.plugin
+  const storage = loaded.storage
   const ctx = {
     effect: (factory) => { factory(); return () => {} },
     sessions,
@@ -434,7 +582,7 @@ function scenario(options = {}) {
   return {
     plugin, registration, registrations, localeRegistrations, document, reactRuntime,
     updates, notices, draft, attachmentIds, session, scope, notification, t, injected, conversation,
-    addedAttachments, removedAttachments, releasedDrafts, draftCalls, readCalls,
+    addedAttachments, removedAttachments, releasedDrafts, draftCalls, readCalls, storage, updateQueueCalls,
   }
 }
 
@@ -463,13 +611,73 @@ function mountDecoration(applied, queue) {
     actions: injected.actions,
     t,
   }
-  reactRuntime.render(registration.component, props)
-  return { snapshot }
+  const tree = reactRuntime.render(registration.component, props)
+  return { snapshot, tree }
 }
-
 // ---------------------------------------------------------------------------
 // 3. Behaviour
 // ---------------------------------------------------------------------------
+
+await check('locked rows use a strikethrough and a per-row lock instead of a blue outline', () => {
+  assert(clientSource.includes('dshqw-locked-row'))
+  assert(clientSource.includes('text-decoration: line-through'))
+  assert(clientSource.includes('LOCK_ICON'))
+  assert(clientSource.includes('UNLOCK_ICON'))
+  assert(clientSource.includes('readFrozen'))
+  assert(!clientSource.includes('dshqw-frozen-item'), 'no synthetic rows')
+  assert(!clientSource.includes('box-shadow: inset 0 0 0 1px color-mix'), 'no outline indicator')
+  assert(clientSource.includes('li [class*="lead"]'), 'the redundant Host queue icon is hidden')
+})
+
+await check('layout churn diagnostics are wired', () => {
+  assert(clientSource.includes("reportLayout('dock-geometry'"))
+  assert(clientSource.includes("reportLayout('buttons-dropped'"))
+  assert(clientSource.includes('noteDecoration('))
+  assert(clientSource.includes('data-submission-echo'))
+})
+
+await check('injected actions match the Host action geometry', () => {
+  assert(clientSource.includes('width: 28px;'), '28px hit box')
+  assert(clientSource.includes('height: 28px;'), '28px hit box height')
+  assert(clientSource.includes('border-radius: 999px'), 'circle hit box')
+  assert(!clientSource.includes('width: 20px'), 'no shrunken lock button')
+  assert(!clientSource.includes('viewBox="0 0 16 16" width="14"'), 'glyphs fill the 14px box')
+  assert(clientSource.includes('row.insertBefore(freeze, actions)'), 'lock precedes the native actions')
+  assert(clientSource.includes('row.append?.(withdraw)'), 'withdraw trails the native actions')
+})
+
+await check('a locked message disables editing and unlocking returns it to the queue', async () => {
+  let ids = ['item-1']
+  const applied = scenario({
+    fetch: async (url) => {
+      if (url.includes('/frozen')) return { ok: true, json: async () => ({ ok: true, ids: [...ids] }) }
+      if (url.includes('/thaw')) {
+        ids = ids.filter((id) => id !== 'item-1')
+        return { ok: true, json: async () => ({ ok: true }) }
+      }
+      return { ok: true, json: async () => ({ ok: true }) }
+    },
+  })
+  const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
+  mountDecoration(applied, [queueItem('queued text')])
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(hostEdit.disabled, true, 'Host edit disabled while locked')
+  assert.equal(applied.document._rows[0].classList.contains('dshqw-locked-row'), true)
+  const lock = applied.document._rows[0].descendants().find((node) => node.getAttribute('data-dshq-freeze') !== null)
+  assert(lock, 'per-row lock button rendered')
+  assert.equal(lock.getAttribute('data-locked'), 'true')
+  await lock.dispatch('click')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(hostEdit.disabled, false, 'edit restored after unlock')
+  assert.equal(applied.document._rows[0].classList.contains('dshqw-locked-row'), false)
+  assert.equal(lock.getAttribute('data-locked'), 'false')
+})
+
+await check('an empty conversation renders no overlay tree', () => {
+  const applied = scenario()
+  const { tree } = mountDecoration(applied, [])
+  assert.equal(tree, null)
+})
 
 await check('factory registers one queue-dock decoration', () => {
   const { plugin, registrations, registration, localeRegistrations } = scenario()
@@ -479,6 +687,39 @@ await check('factory registers one queue-dock decoration', () => {
   assert.equal(registration.options.id, 'queue-withdraw')
   assert.equal(registration.options.order, 21)
   assert.equal(localeRegistrations[0].ns, 'queueWithdraw')
+})
+
+await check('freeze posts the id to the Host route', async () => {
+  const requests = []
+  const applied = scenario({
+    fetch: async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) })
+      return { ok: true, json: async () => ({ ok: true, index: 1 }) }
+    },
+  })
+  const ok = await applied.injected.actions.freeze('item-1', 'failed')
+  assert.equal(ok, true)
+  assert.equal(requests[0].url, '/dsh-queue-withdraw/freeze')
+  equal(requests[0].body, { sessionId: 'session-a', itemId: 'item-1' })
+  equal(applied.notices, [], 'successful freeze is silent')
+})
+
+await check('readFrozen returns the Host ids', async () => {
+  const applied = scenario({
+    fetch: async () => ({ ok: true, json: async () => ({ ok: true, ids: ['item-1', 'item-2'] }) }),
+  })
+  const ids = await applied.injected.actions.readFrozen('failed')
+  equal(ids, ['item-1', 'item-2'])
+})
+
+await check('freeze keeps the queue untouched when the Host rejects it', async () => {
+  const applied = scenario({
+    fetch: async () => ({ ok: false, json: async () => ({ ok: false, reason: 'queue-changed' }) }),
+  })
+  const ok = await applied.injected.actions.freeze('item-1', 'failed')
+  assert.equal(ok, false)
+  assert.equal(applied.storage.has('dsh.queueWithdraw.frozen'), false)
+  equal(applied.notices, [{ level: 'error', text: 'failed' }])
 })
 
 await check('withdraw appends text to the draft and removes the queue item', async () => {
@@ -546,22 +787,30 @@ await check('forgetCached drops files after their queue message leaves', async (
   equal(applied.notices, [{ level: 'error', text: 'cache-missing' }])
 })
 
-await check('the Host edit control opens the inline editor', () => {
+await check('text messages keep the Host native inline editor', () => {
   const applied = scenario({ draft: 'existing' })
   const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   mountDecoration(applied, [queueItem('queued text')])
   assert.equal(hostEdit.disabled, false)
-  assert.equal(hostEdit.getAttribute('aria-label'), '编辑排队消息')
-  assert.equal(hostEdit.title, '')
+  assert.equal(hostEdit.getAttribute('aria-label'), '编辑', 'the Host label is untouched')
+  assert.equal(hostEdit.getAttribute('data-dshq-edit'), null, 'no interception marker')
 })
 
-await check('the edit control is enabled for attachment queues', () => {
+await check('native text edits keep the message attachments', async () => {
+  const applied = scenario()
+  const image = { type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }
+  mountDecoration(applied, [queueItem('queued text', [image])])
+  await applied.conversation.updateQueue('item-1', { kind: 'edit', content: [{ type: 'text', text: 'edited' }] })
+  equal(applied.updateQueueCalls[0].action.content, [{ type: 'text', text: 'edited' }, image])
+})
+
+await check('attachment-only messages fall back to the plugin editor', () => {
   const applied = scenario({ draft: 'existing' })
-  const item = queueItem('queued text', [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }])
+  const item = { id: 'item-1', content: [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png' } }] }
   const hostEdit = applied.document._actions.children.find((node) => node.getAttribute('aria-label') === '编辑')
   hostEdit.disabled = true
   mountDecoration(applied, [item])
-  assert.equal(hostEdit.disabled, false, 'edit control enabled for attachments')
+  assert.equal(hostEdit.disabled, false, 'the Host control is re-enabled for the fallback')
   assert.equal(hostEdit.getAttribute('aria-label'), '编辑排队消息')
 })
 
@@ -579,10 +828,13 @@ await check('a separate withdraw control is injected into the Host row', () => {
   assert(clientSource.includes('withdrawThrough(withdraw'))
 })
 
-await check('drag uses a row ghost instead of only the handle', () => {
+await check('rows are draggable without a drag handle icon', () => {
   assert(clientSource.includes('dshqw-drag-ghost'))
   assert(clientSource.includes('dshqw-drag-source'))
-  assert(clientSource.includes("handle.addEventListener('pointerdown'"))
+  assert(clientSource.includes("row.addEventListener('pointerdown'"))
+  assert(!clientSource.includes('data-dshq-handle'), 'no handle button')
+  assert(!clientSource.includes('dshqw-handle'), 'no handle styles')
+  assert(clientSource.includes('onRowControl'), 'row controls keep their own presses')
 })
 
 await check('drag-to-merge uses the Host update route instead of a global button', () => {
@@ -592,7 +844,7 @@ await check('drag-to-merge uses the Host update route instead of a global button
   assert(!clientSource.includes('mergeQueue'))
 })
 
-await check('dragging a queue row posts the complete new order', async () => {
+await check('dragging the row body posts the complete new order', async () => {
   const requests = []
   const fetch = async (url, init) => {
     requests.push({ url, body: JSON.parse(init.body) })
@@ -601,21 +853,18 @@ await check('dragging a queue row posts the complete new order', async () => {
   const applied = scenario({ rows: 2, fetch })
   const second = { ...queueItem('second'), id: 'item-2' }
   mountDecoration(applied, [queueItem('first'), second])
-  const handles = applied.document._rows.map((row) => row.querySelector('[data-dshq-handle]'))
-  assert(handles[0] && handles[1], 'each row has a drag handle')
-  assert.equal(applied.document._rows[0].children[0], handles[0], 'handle stays on the leading edge')
-  const data = {
-    types: ['application/x-dshq-item'],
-    data: {},
-    effectAllowed: '',
-    dropEffect: '',
-    getData(type) { return this.data[type] ?? '' },
-    setData(type, value) { this.data[type] = value },
-  }
-  await handles[1].dispatch('dragstart', { dataTransfer: data })
-  await applied.document._rows[0].dispatch('drop', { dataTransfer: data })
-  equal(requests.map((request) => request.url), ['/dsh-queue-withdraw/reorder'])
-  equal(requests[0].body, { sessionId: 'session-a', order: ['item-2', 'item-1'] })
+  const [first, last] = applied.document._rows
+  first._rect = { left: 0, top: 0, width: 400, height: 36 }
+  last._rect = { left: 0, top: 36, width: 400, height: 36 }
+  assert.equal(last.getAttribute('data-dshq-row'), '', 'the row is the drag source')
+  assert.equal(last.getAttribute('data-dshq-handle'), null, 'no handle injected')
+  await last.dispatch('pointerdown', { button: 0, clientX: 200, clientY: 54, target: last })
+  applied.document._hit = first
+  await applied.document.dispatch('pointermove', { clientX: 200, clientY: 10 })
+  await applied.document.dispatch('pointerup', {})
+  const reorder = requests.filter((request) => request.url.endsWith('/reorder'))
+  equal(reorder.map((request) => request.url), ['/dsh-queue-withdraw/reorder'])
+  equal(reorder[0].body, { sessionId: 'session-a', order: ['item-2', 'item-1'] })
 })
 
 await check('composer attachments are restored after the session component unmounts', async () => {
@@ -636,6 +885,9 @@ await check('composer attachments are restored after the session component unmou
 function hostScenario() {
   let route
   let updateRoute
+  let freezeRoute
+  let thawRoute
+  let frozenRoute
   const messages = [
     { id: 'item-1', content: [{ type: 'text', text: 'first' }] },
     { id: 'item-2', content: [{ type: 'text', text: 'second' }] },
@@ -652,12 +904,16 @@ function hostScenario() {
     effect(factory) { factory(); return () => {} },
     webServer: {
       register(definition) {
-        if (String(definition.path).endsWith('/update')) updateRoute = definition
-        else route = definition
+        const path = String(definition.path)
+        if (path.endsWith('/update')) updateRoute = definition
+        else if (path.endsWith('/freeze')) freezeRoute = definition
+        else if (path.endsWith('/thaw')) thawRoute = definition
+        else if (path.endsWith('/frozen')) frozenRoute = definition
+        else if (path.endsWith('/reorder')) route = definition
         return () => {}
       },
     },
-    agents: { get: (sessionId) => sessionId === 'session-a' ? agent : undefined },
+    agents: { get: (sessionId) => typeof sessionId === 'string' && sessionId.startsWith('session-') ? agent : undefined },
     attachments: {
       async saveImages(inputs) { return inputs.map((_input, index) => ({ attachmentId: 'image-new-' + String(index), mediaType: 'image/png', name: 'new.png' })) },
       async saveFile(input) { return { attachmentId: 'file-new', name: input.name ?? 'new.bin', bytes: input.data.length } },
@@ -684,7 +940,14 @@ function hostScenario() {
     await updateRoute.handler(req, res)
     return { response, messages }
   }
-  return { route, updateRoute, invoke, invokeUpdate, messages }
+  const invokeOn = async (definition, body) => {
+    const response = { status: null, headers: null, payload: null }
+    const req = { method: 'POST', async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
+    const res = { writeHead(status) { response.status = status }, end(text) { response.payload = JSON.parse(text) } }
+    await definition.handler(req, res)
+    return { response, messages }
+  }
+  return { route, updateRoute, freezeRoute, thawRoute, frozenRoute, invoke, invokeUpdate, invokeOn, messages }
 }
 
 await check('the Host route applies a complete next-turn order through inbox.splice', async () => {
@@ -733,8 +996,102 @@ await check('the Host update route replaces text and keeps existing attachments'
   equal(messages[0].content, [{ type: 'text', text: 'edited' }, image])
 })
 
+await check('the Host freeze route keeps the message queued and reports its slot', async () => {
+  const host = hostScenario()
+  assert.equal(host.freezeRoute.path, '/dsh-queue-withdraw/freeze')
+  const { response, messages } = await host.invokeOn(host.freezeRoute, { sessionId: 'session-freeze', itemId: 'item-1' })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.ok, true)
+  assert.equal(response.payload.index, 0)
+  equal(messages.map((message) => message.id), ['item-1', 'item-2'], 'the message stays in next-turn')
+  const frozen = await host.invokeOn(host.frozenRoute, { sessionId: 'session-freeze' })
+  equal(frozen.response.payload.ids, ['item-1'])
+})
+
+await check('the Host freeze route rejects an item that is not queued', async () => {
+  const host = hostScenario()
+  const { response } = await host.invokeOn(host.freezeRoute, { sessionId: 'session-missing', itemId: 'missing' })
+  assert.equal(response.status, 409)
+  equal(host.messages.map((message) => message.id), ['item-1', 'item-2'])
+})
+
+await check('the Host thaw route releases a held id', async () => {
+  const host = hostScenario()
+  assert.equal(host.thawRoute.path, '/dsh-queue-withdraw/thaw')
+  await host.invokeOn(host.freezeRoute, { sessionId: 'session-thaw', itemId: 'item-1' })
+  const { response } = await host.invokeOn(host.thawRoute, { sessionId: 'session-thaw', itemId: 'item-1' })
+  assert.equal(response.status, 200)
+  const frozen = await host.invokeOn(host.frozenRoute, { sessionId: 'session-thaw' })
+  equal(frozen.response.payload.ids, [])
+  equal(host.messages.map((entry) => entry.id), ['item-1', 'item-2'])
+})
+
+await check('the Host frozen route reports only that session ids', async () => {
+  const host = hostScenario()
+  await host.invokeOn(host.freezeRoute, { sessionId: 'session-list', itemId: 'item-2' })
+  const frozen = await host.invokeOn(host.frozenRoute, { sessionId: 'session-list' })
+  equal(frozen.response.payload.ids, ['item-2'])
+  const other = await host.invokeOn(host.frozenRoute, { sessionId: 'session-other' })
+  equal(other.response.payload.ids, [])
+})
+
+await check('the Host claim patch skips held ids at the turn boundary', async () => {
+  class FakeInbox {
+    constructor(sessionId, messages) {
+      this.sessionId = sessionId
+      this.messages = messages
+      this.events = []
+    }
+    get session() { return { id: this.sessionId } }
+    get nextTurn() { return this.messages }
+    get nextStep() { return [] }
+    get dispatch() { return { emit: (name, payload) => this.events.push({ name, payload }) } }
+    mutate(target, start, deleteCount, inserted) {
+      if (target !== 'next-turn') return []
+      return this.messages.splice(start, deleteCount, ...inserted)
+    }
+    claim(target) {
+      const claimed = this.mutate('next-step', 0, 0, [], false)
+      if (target === 'next-turn') claimed.push(...this.mutate('next-turn', 0, 1, [], false))
+      return claimed
+    }
+  }
+  const inbox = new FakeInbox('session-claim', [
+    { id: 'held', content: [{ type: 'text', text: 'held' }] },
+    { id: 'free', content: [{ type: 'text', text: 'free' }] },
+  ])
+  const routes = {}
+  const ctx = {
+    effect: (factory) => factory(),
+    webServer: { register: (definition) => { routes[definition.path] = definition; return () => {} } },
+    agents: { get: (sessionId) => sessionId === 'session-claim' ? { inbox } : undefined },
+    sessions: { list: { getSnapshot: () => ({ ids: ['session-claim'] }) } },
+    attachments: {},
+  }
+  applyHostPlugin(ctx)
+  const invoke = async (path, body) => {
+    const response = { status: null, payload: null }
+    const req = { method: 'POST', async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
+    const res = { writeHead(status) { response.status = status }, end(text) { response.payload = JSON.parse(text) } }
+    await routes[path].handler(req, res)
+    return response
+  }
+  // Boot arming patched the prototype through the session list.
+  await invoke('/dsh-queue-withdraw/freeze', { sessionId: 'session-claim', itemId: 'held' })
+  const first = inbox.claim('next-turn', { id: 'turn-1' })
+  equal(first.map((message) => message.id), ['free'], 'the held id is skipped')
+  const second = inbox.claim('next-turn', { id: 'turn-2' })
+  equal(second, [], 'nothing is claimed while the rest is held')
+  equal(inbox.nextTurn.map((message) => message.id), ['held'])
+  await invoke('/dsh-queue-withdraw/thaw', { sessionId: 'session-claim', itemId: 'held' })
+  const third = inbox.claim('next-turn', { id: 'turn-3' })
+  equal(third.map((message) => message.id), ['held'], 'thawed ids are claimed again')
+})
+
 if (process.exitCode === 1) {
   console.error('\n' + checks + ' check(s) passed, some failed')
 } else {
   console.log('\nall checks passed (' + checks + ')')
 }
+
+
